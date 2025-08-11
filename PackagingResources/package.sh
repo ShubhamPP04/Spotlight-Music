@@ -35,20 +35,22 @@ RES_DIR="$APP_PATH/Contents/Resources"
 mkdir -p "$BUILD_DIR" "$DIST_DIR"
 
 # 1) Build
-BUILD_SIGN_FLAG=()
 if [[ -z "$SIGN_ID" ]]; then
-  BUILD_SIGN_FLAG+=("CODE_SIGNING_ALLOWED=NO")
-fi
-xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -configuration "$CONFIG" -derivedDataPath "$BUILD_DIR/DerivedData" -quiet build "${BUILD_SIGN_FLAG[@]}"
-
-# Find the .app in DerivedData if needed
-if [[ ! -d "$APP_PATH" ]]; then
-  APP_PATH=$(find "$BUILD_DIR/DerivedData" -name "$APP_NAME" -type d | head -n1)
-fi
-if [[ ! -d "$APP_PATH" ]]; then
-  echo "App not found after build" >&2; exit 1
+  xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -configuration "$CONFIG" -derivedDataPath "$BUILD_DIR/DerivedData" -quiet build CODE_SIGNING_ALLOWED=NO
+else
+  xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -configuration "$CONFIG" -derivedDataPath "$BUILD_DIR/DerivedData" -quiet build
 fi
 
+# Find the .app in DerivedData if needed (ignore stale placeholder at $BUILD_DIR/$CONFIG)
+if [[ ! -d "$APP_PATH" || ! -f "$APP_PATH/Contents/Info.plist" || ! -d "$APP_PATH/Contents/MacOS" ]]; then
+  APP_PATH=$(find "$BUILD_DIR/DerivedData" -path "*/Build/Products/$CONFIG/$APP_NAME" -type d | head -n1)
+fi
+if [[ ! -d "$APP_PATH" || ! -f "$APP_PATH/Contents/Info.plist" || ! -d "$APP_PATH/Contents/MacOS" ]]; then
+  echo "App not found or incomplete after build (no Info.plist or MacOS)." >&2; exit 1
+fi
+
+# Recompute resources dir for the resolved APP_PATH
+RES_DIR="$APP_PATH/Contents/Resources"
 mkdir -p "$RES_DIR"
 
 # 2) Bundle Python runtime (optional)
@@ -68,7 +70,13 @@ fi
 # 4) Codesign (optional)
 if [[ -n "$SIGN_ID" ]]; then
   echo "Codesigning with $SIGN_ID"
-  codesign --force --deep --options runtime --sign "$SIGN_ID" "$APP_PATH"
+  if [[ "$SIGN_ID" == "-" || "$SIGN_ID" == "adhoc" ]]; then
+    # Ad-hoc signing (no hardened runtime)
+    codesign --force --deep --sign - "$APP_PATH"
+  else
+    # Developer ID signing with hardened runtime
+    codesign --force --deep --options runtime --sign "$SIGN_ID" "$APP_PATH"
+  fi
 fi
 
 # 5) Create DMG

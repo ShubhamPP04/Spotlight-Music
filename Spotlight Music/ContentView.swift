@@ -17,6 +17,7 @@ struct IdentifiableString: Identifiable {
 struct ContentView: View {
     @StateObject private var viewModel = AppViewModel()
     @StateObject private var settings = SettingsManager.shared
+    @FocusState private var isSearchFieldFocused: Bool
     
     // Energy-efficient hover animation helper
     private func energyEfficientHover(_ isHovered: Binding<Bool>) -> some View {
@@ -156,8 +157,12 @@ struct ContentView: View {
             .onChange(of: viewModel.query) { _, _ in
                 resetExpandedStates()
             }
+            .onChange(of: viewModel.nowPlaying?.id) { _, _ in
+                ensureVisibleNowPlaying()
+            }
             .onAppear {
                 animatedHeight = targetHeight
+                isSearchFieldFocused = true
             }
             .task { await viewModel.performSetupForPython() }
             .alert(item: errorBinding) { (item: IdentifiableString) in
@@ -206,6 +211,36 @@ struct ContentView: View {
         expandedArtistAlbums = false
     }
 
+    private func ensureVisibleNowPlaying() {
+        guard let nowId = viewModel.nowPlaying?.id else { return }
+        // If the current song is inside the songs list but outside the collapsed view, auto-expand
+        if !expandedSongs {
+            if let idx = viewModel.songs.firstIndex(where: { $0.id == nowId }) {
+                let collapsedLimit = min(viewModel.songs.count, 4)
+                if idx >= collapsedLimit {
+                    if settings.shouldEnableAnimations() {
+                        withAnimation(.easeInOut(duration: 0.2)) { expandedSongs = true }
+                    } else {
+                        expandedSongs = true
+                    }
+                }
+            }
+        }
+        // Same for videos section
+        if !expandedVideos {
+            if let vIdx = viewModel.videos.firstIndex(where: { $0.id == nowId }) {
+                let collapsedLimit = min(viewModel.videos.count, 4)
+                if vIdx >= collapsedLimit {
+                    if settings.shouldEnableAnimations() {
+                        withAnimation(.easeInOut(duration: 0.2)) { expandedVideos = true }
+                    } else {
+                        expandedVideos = true
+                    }
+                }
+            }
+        }
+    }
+
     private var searchBar: some View {
         HStack(spacing: 12) {
             Image(systemName: "magnifyingglass")
@@ -217,6 +252,7 @@ struct ContentView: View {
             ))
             .textFieldStyle(.plain)
             .font(.system(size: 18, weight: .medium))
+            .focused($isSearchFieldFocused)
             .onSubmit { Task { await viewModel.performSearch(viewModel.query) } }
             
             if !viewModel.query.isEmpty {
@@ -251,8 +287,9 @@ struct ContentView: View {
     }
 
     private var resultsPane: some View {
-        ScrollView(showsIndicators: false) {
-            LazyVStack(alignment: .leading, spacing: 8) {
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 8) {
                 if let selectedAlbum = viewModel.selectedAlbum {
                     // Album detail view
                     albumDetailView(selectedAlbum)
@@ -268,6 +305,7 @@ struct ContentView: View {
                         }, onToggleFavorite: {
                             viewModel.toggleFavorite(nowPlaying)
                         })
+                        .id(nowPlaying.id)
                     }
                     
                     if !viewModel.favoriteSongs.isEmpty {
@@ -278,6 +316,7 @@ struct ContentView: View {
                             }, onToggleFavorite: {
                                 viewModel.toggleFavorite(item)
                             })
+                            .id(item.id)
                         }
                     }
                 } else {
@@ -302,11 +341,21 @@ struct ContentView: View {
                         }
                     }
                 }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
             }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 8)
+            .frame(maxHeight: animatedHeight - 92) // Dynamic max height based on window size
+            .onChange(of: viewModel.nowPlaying?.id) { _, newId in
+                guard let id = newId else { return }
+                let animate = settings.shouldEnableAnimations()
+                if animate {
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) }
+                } else {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
         }
-        .frame(maxHeight: animatedHeight - 92) // Dynamic max height based on window size
     }
     
     @ViewBuilder
@@ -317,10 +366,11 @@ struct ContentView: View {
             let songsToShow = expandedSongs ? viewModel.songs.count : min(viewModel.songs.count, 4)
             ForEach(Array(viewModel.songs.prefix(songsToShow).enumerated()), id: \.element.id) { index, item in
                 SongRow(item: item, isActive: viewModel.nowPlaying?.id == item.id, isFavorite: viewModel.isFavorite(item), onPlay: {
-                    viewModel.play(song: item, fromPlaylist: Array(viewModel.songs.prefix(songsToShow)), atIndex: index)
+                    viewModel.play(song: item, fromPlaylist: viewModel.songs, atIndex: index)
                 }, onToggleFavorite: {
                     viewModel.toggleFavorite(item)
                 })
+                .id(item.id)
             }
             if viewModel.songs.count > 4 && !expandedSongs {
                 ShowAllButton(count: viewModel.songs.count, type: "Songs") {
@@ -373,8 +423,9 @@ struct ContentView: View {
             let videosToShow = expandedVideos ? viewModel.videos.count : min(viewModel.videos.count, 4)
             ForEach(Array(viewModel.videos.prefix(videosToShow).enumerated()), id: \.element.id) { index, video in
                 VideoRow(video: video, isActive: viewModel.nowPlaying?.id == video.id, onPlay: {
-                    viewModel.play(video: video)
+                    viewModel.play(video: video, fromPlaylist: viewModel.videos, atIndex: index)
                 })
+                .id(video.id)
             }
             if viewModel.videos.count > 4 && !expandedVideos {
                 ShowAllButton(count: viewModel.videos.count, type: "Videos") {
@@ -476,6 +527,7 @@ struct ContentView: View {
                     }, onToggleFavorite: {
                         viewModel.toggleFavorite(song)
                     })
+                    .id(song.id)
                 }
             }
         }
@@ -547,6 +599,7 @@ struct ContentView: View {
                     }, onToggleFavorite: {
                         viewModel.toggleFavorite(song)
                     })
+                    .id(song.id)
                 }
             }
             

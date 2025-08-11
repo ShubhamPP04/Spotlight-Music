@@ -3,6 +3,33 @@ import AVFoundation
 import MediaPlayer
 import AppKit
 
+// Concurrency-friendly semaphore for async contexts (Swift 6-safe)
+actor AsyncSemaphore {
+    private var permits: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    
+    init(value: Int) { self.permits = value }
+    
+    func acquire() async {
+        if permits > 0 {
+            permits -= 1
+            return
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            waiters.append(continuation)
+        }
+    }
+    
+    func release() {
+        if !waiters.isEmpty {
+            let cont = waiters.removeFirst()
+            cont.resume()
+        } else {
+            permits += 1
+        }
+    }
+}
+
 extension NSImage {
     func resized(to newSize: NSSize) -> NSImage {
         let newImage = NSImage(size: newSize)
@@ -29,8 +56,8 @@ final class AppViewModel: ObservableObject {
     private var searchCache: [String: SearchAllResponse] = [:]
     private let maxCacheSize = 20
     
-    // Limit concurrent network requests to save energy
-    private let networkSemaphore = DispatchSemaphore(value: 2)
+    // Limit concurrent network requests to save energy (Swift 6-safe)
+    private let networkLimiter = AsyncSemaphore(value: 2)
     
     // Detail view states
     @Published var selectedAlbum: AlbumItem?
@@ -189,14 +216,9 @@ final class AppViewModel: ObservableObject {
         isSearching = true
         defer { isSearching = false }
         
-        // Limit concurrent network requests to save energy
-        await withCheckedContinuation { continuation in
-            Task {
-                networkSemaphore.wait()
-                continuation.resume()
-            }
-        }
-        defer { networkSemaphore.signal() }
+        // Limit concurrent network requests to save energy (Swift 6-safe)
+        await networkLimiter.acquire()
+        defer { Task { await networkLimiter.release() } }
         
         do {
             let resp = try await runHelper(arguments: ["search_all", trimmed])
@@ -249,7 +271,19 @@ final class AppViewModel: ObservableObject {
     
     func play(video: VideoItem) {
         // Convert video to song format for playback
-        let songItem = SongItem(
+        let songItem = songItem(from: video)
+        play(song: songItem)
+    }
+    
+    func play(video: VideoItem, fromPlaylist playlist: [VideoItem], atIndex index: Int) {
+        // Map video playlist to song playlist for unified playback handling
+        let mappedPlaylist = playlist.map { songItem(from: $0) }
+        let currentSong = songItem(from: video)
+        play(song: currentSong, fromPlaylist: mappedPlaylist, atIndex: index)
+    }
+
+    private func songItem(from video: VideoItem) -> SongItem {
+        return SongItem(
             id: video.id,
             title: video.title,
             artists: video.artists,
@@ -257,7 +291,6 @@ final class AppViewModel: ObservableObject {
             duration: video.duration,
             thumbnail: video.thumbnail
         )
-        play(song: songItem)
     }
     
     func play(song: SongItem, fromPlaylist playlist: [SongItem]?, atIndex index: Int) {
@@ -343,6 +376,9 @@ final class AppViewModel: ObservableObject {
     private func handleSongEnded() {
         MPNowPlayingInfoCenter.default().playbackState = .stopped
         
+        // Respect user setting for auto-play next
+        if !SettingsManager.shared.autoPlayNext { return }
+
         // Auto-play next song if playing from a playlist
         if isPlayingFromPlaylist && currentPlaylistIndex >= 0 && currentPlaylistIndex < currentPlaylist.count - 1 {
             let nextIndex = currentPlaylistIndex + 1
@@ -376,23 +412,31 @@ final class AppViewModel: ObservableObject {
         guard let player = player else { return }
         // Reduce update frequency to every 10 seconds to save energy
         let interval = CMTime(seconds: 10, preferredTimescale: 1)
-        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .global(qos: .utility)) { [weak self] currentTime in
+        timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] currentTime in
             guard let self else { return }
-            
+
             let currentSeconds = CMTimeGetSeconds(currentTime)
             let rate = player.rate
-            
-            // Only update if there's a significant change (save energy)
-            let timeDiff = abs(currentSeconds - lastProgressUpdate)
-            let rateDiff = abs(rate - lastPlaybackRate)
-            
-            guard timeDiff > 5.0 || rateDiff > 0.1 else { return }
-            
-            lastProgressUpdate = currentSeconds
-            lastPlaybackRate = rate
-            
+
             Task { @MainActor in
+                // Only update if there's a significant change (save energy)
+                let timeDiff = abs(currentSeconds - self.lastProgressUpdate)
+                let rateDiff = abs(rate - self.lastPlaybackRate)
+                guard timeDiff > 5.0 || rateDiff > 0.1 else { return }
+
+                self.lastProgressUpdate = currentSeconds
+                self.lastPlaybackRate = rate
+
                 var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+                // If duration wasn't known at start (e.g., artist page items), try to fill from the player item once available
+                if info[MPMediaItemPropertyPlaybackDuration] == nil || (info[MPMediaItemPropertyPlaybackDuration] as? Double ?? 0) <= 0 {
+                    if let durationTime = self.player?.currentItem?.duration {
+                        let total = CMTimeGetSeconds(durationTime)
+                        if total.isFinite && total > 0 {
+                            info[MPMediaItemPropertyPlaybackDuration] = total
+                        }
+                    }
+                }
                 info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentSeconds
                 info[MPNowPlayingInfoPropertyPlaybackRate] = rate
                 MPNowPlayingInfoCenter.default().nowPlayingInfo = info
@@ -641,14 +685,14 @@ def simplify_song(item: Dict[str, Any]):
         vid = item.get("videoId")
         if not vid:
             return None
-        
+
         # Handle different data structures for search results vs artist songs
         if "resultType" in item and item.get("resultType") != "song":
             return None
-            
+
         artists = item.get("artists") or []
         thumbs = item.get("thumbnails") or []
-        
+
         # Handle album data - could be dict or string
         album_name = None
         if "album" in item:
@@ -657,14 +701,39 @@ def simplify_song(item: Dict[str, Any]):
                 album_name = album_data.get("name")
             elif isinstance(album_data, str):
                 album_name = album_data
-        
+
+        # Normalize duration to mm:ss for consistent UI/seek behavior
+        duration_text: Optional[str] = None
+        # Common text fields first
+        for key in ("duration", "length", "lengthText"):
+            val = item.get(key)
+            if isinstance(val, str) and val:
+                duration_text = val
+                break
+        # Fallback to second-based fields
+        if not duration_text:
+            sec_val = item.get("duration_seconds") or item.get("lengthSeconds")
+            try:
+                if isinstance(sec_val, (int, float)):
+                    secs = int(sec_val)
+                elif isinstance(sec_val, str) and sec_val.isdigit():
+                    secs = int(sec_val)
+                else:
+                    secs = None
+                if secs is not None and secs >= 0:
+                    minutes = secs // 60
+                    rem = secs % 60
+                    duration_text = f"{minutes}:{rem:02d}"
+            except Exception:
+                duration_text = None
+
         return {
             "id": vid,
             "videoId": vid,
             "title": item.get("title") or "",
             "artists": ", ".join([a.get("name", "") for a in artists if isinstance(a, dict)]),
             "album": album_name,
-            "duration": item.get("duration") or item.get("length"),
+            "duration": duration_text,
             "thumbnail": thumbs[-1]["url"] if thumbs else None,
         }
     except Exception:
