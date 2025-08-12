@@ -36,9 +36,24 @@ mkdir -p "$BUILD_DIR" "$DIST_DIR"
 
 # 1) Build
 if [[ -z "$SIGN_ID" ]]; then
-  xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -configuration "$CONFIG" -derivedDataPath "$BUILD_DIR/DerivedData" -quiet build CODE_SIGNING_ALLOWED=NO
+  xcodebuild \
+    -project "$PROJECT_PATH" \
+    -scheme "$SCHEME" \
+    -configuration "$CONFIG" \
+    -derivedDataPath "$BUILD_DIR/DerivedData" \
+    -quiet build \
+    CODE_SIGNING_ALLOWED=NO \
+    MARKETING_VERSION="$VERSION" \
+    CURRENT_PROJECT_VERSION="$VERSION"
 else
-  xcodebuild -project "$PROJECT_PATH" -scheme "$SCHEME" -configuration "$CONFIG" -derivedDataPath "$BUILD_DIR/DerivedData" -quiet build
+  xcodebuild \
+    -project "$PROJECT_PATH" \
+    -scheme "$SCHEME" \
+    -configuration "$CONFIG" \
+    -derivedDataPath "$BUILD_DIR/DerivedData" \
+    -quiet build \
+    MARKETING_VERSION="$VERSION" \
+    CURRENT_PROJECT_VERSION="$VERSION"
 fi
 
 # Find the .app in DerivedData if needed (ignore stale placeholder at $BUILD_DIR/$CONFIG)
@@ -79,9 +94,14 @@ if [[ -n "$SIGN_ID" ]]; then
   fi
 fi
 
-# 5) Create DMG
+# 5) Create DMG with Applications symlink (drag-and-drop)
 DMG_PATH="$DIST_DIR/Spotlight-Music-$VERSION.dmg"
 rm -f "$DMG_PATH"
-hdiutil create -volname "Spotlight Music" -srcfolder "$APP_PATH" -format UDZO "$DMG_PATH"
+STAGE_DIR="$BUILD_DIR/dmg_stage"
+rm -rf "$STAGE_DIR"
+mkdir -p "$STAGE_DIR"
+cp -R "$APP_PATH" "$STAGE_DIR/"
+ln -s /Applications "$STAGE_DIR/Applications" || true
+hdiutil create -volname "Spotlight Music" -srcfolder "$STAGE_DIR" -format UDZO "$DMG_PATH"
 
 echo "DMG created at: $DMG_PATH"

@@ -215,11 +215,12 @@ struct SettingsView: View {
                         SettingsRow(
                             icon: "info.circle",
                             title: "Version",
-                            subtitle: "Spotlight Music v1.0.0"
+                            subtitle: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
                         ) {
                             Button("Copy") {
+                                let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
                                 NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString("Spotlight Music v1.0.0", forType: .string)
+                                NSPasteboard.general.setString("Spotlight Music v\(ver)", forType: .string)
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)

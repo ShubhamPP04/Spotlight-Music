@@ -75,6 +75,8 @@ final class AppViewModel: ObservableObject {
     private var player: AVPlayer?
     private var searchTask: Task<Void, Never>?
     private var timeObserverToken: Any?
+    private var endObserverToken: Any?
+    private var didTriggerEndForCurrentItem: Bool = false
     private var remoteCommandsConfigured = false
 
     // MARK: - Python environment bootstrap without venv
@@ -327,7 +329,10 @@ final class AppViewModel: ObservableObject {
             existing.removeTimeObserver(token)
             timeObserverToken = nil
         }
-        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: player?.currentItem)
+        if let endToken = endObserverToken {
+            NotificationCenter.default.removeObserver(endToken)
+            endObserverToken = nil
+        }
         
         // Set loading state in now playing
         MPNowPlayingInfoCenter.default().playbackState = .interrupted
@@ -355,13 +360,18 @@ final class AppViewModel: ObservableObject {
                 let player = AVPlayer(playerItem: item)
                 self.player = player
                 player.play()
+                self.didTriggerEndForCurrentItem = false
 
                 await self.configureNowPlaying(for: song, streamURL: url)
                 self.observePlaybackProgress()
                 self.configureRemoteCommandCenter()
-                NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                self.endObserverToken = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                    guard let self else { return }
                     Task { @MainActor in
-                        self?.handleSongEnded()
+                        if !self.didTriggerEndForCurrentItem {
+                            self.didTriggerEndForCurrentItem = true
+                            self.handleSongEnded()
+                        }
                     }
                 }
             } catch {
@@ -441,6 +451,19 @@ final class AppViewModel: ObservableObject {
                 info[MPNowPlayingInfoPropertyPlaybackRate] = rate
                 MPNowPlayingInfoCenter.default().nowPlayingInfo = info
                 MPNowPlayingInfoCenter.default().playbackState = rate > 0 ? .playing : .paused
+
+                // Fallback: if we are within 1s of the end, auto-advance once
+                if SettingsManager.shared.autoPlayNext,
+                   self.isPlayingFromPlaylist,
+                   let durationTime = self.player?.currentItem?.duration,
+                   durationTime.isNumeric,
+                   CMTimeGetSeconds(durationTime).isFinite {
+                    let total = CMTimeGetSeconds(durationTime)
+                    if total > 0, total - currentSeconds <= 1.0, !self.didTriggerEndForCurrentItem {
+                        self.didTriggerEndForCurrentItem = true
+                        self.handleSongEnded()
+                    }
+                }
             }
         }
     }

@@ -37,6 +37,7 @@ struct ContentView: View {
     @State private var expandedArtists = false
     @State private var expandedVideos = false
     @State private var expandedArtistAlbums = false
+    @State private var suppressNextAutoScroll = false
     
     private var targetHeight: CGFloat {
         let searchBarHeight: CGFloat = 76
@@ -158,7 +159,11 @@ struct ContentView: View {
                 resetExpandedStates()
             }
             .onChange(of: viewModel.nowPlaying?.id) { _, _ in
-                ensureVisibleNowPlaying()
+                if suppressNextAutoScroll {
+                    suppressNextAutoScroll = false
+                } else {
+                    ensureVisibleNowPlaying()
+                }
             }
             .onAppear {
                 animatedHeight = targetHeight
@@ -305,18 +310,23 @@ struct ContentView: View {
                         }, onToggleFavorite: {
                             viewModel.toggleFavorite(nowPlaying)
                         })
-                        .id(nowPlaying.id)
+                        .id("now:\(nowPlaying.id)")
                     }
                     
                     if !viewModel.favoriteSongs.isEmpty {
                         SectionHeader("Home · Favorites")
                         ForEach(Array(viewModel.favoriteSongs.prefix(8).enumerated()), id: \.element.id) { index, item in
                             SongRow(item: item, isActive: viewModel.nowPlaying?.id == item.id, isFavorite: true, onPlay: {
-                                viewModel.play(song: item, fromPlaylist: Array(viewModel.favoriteSongs), atIndex: index)
+                                // Ensure we don't auto-scroll away when playing from favorites
+                                suppressNextAutoScroll = true
+                                // Play from the full favorites list and compute the correct index within it
+                                let fullFavorites = Array(viewModel.favoriteSongs)
+                                let fullIndex = fullFavorites.firstIndex(where: { $0.id == item.id }) ?? index
+                                viewModel.play(song: item, fromPlaylist: fullFavorites, atIndex: fullIndex)
                             }, onToggleFavorite: {
                                 viewModel.toggleFavorite(item)
                             })
-                            .id(item.id)
+                            .id("fav:\(item.id)")
                         }
                     }
                 } else {
