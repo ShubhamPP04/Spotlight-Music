@@ -195,6 +195,56 @@ final class AppViewModel: ObservableObject {
         saveFavorites()
     }
     func isFavorite(_ song: SongItem) -> Bool { favoriteSongs.contains(where: { $0.id == song.id }) }
+    
+    // MARK: - Favorites Reordering
+    func moveFavoriteUp(_ song: SongItem) {
+        guard let currentIndex = favoriteSongs.firstIndex(where: { $0.id == song.id }),
+              currentIndex > 0 else { return }
+        
+        let newIndex = currentIndex - 1
+        let movedSong = favoriteSongs.remove(at: currentIndex)
+        favoriteSongs.insert(movedSong, at: newIndex)
+        
+        // Update playlist context if currently playing from favorites
+        updatePlaylistContextAfterReorder()
+        saveFavorites()
+    }
+    
+    func moveFavoriteDown(_ song: SongItem) {
+        guard let currentIndex = favoriteSongs.firstIndex(where: { $0.id == song.id }),
+              currentIndex < favoriteSongs.count - 1 else { return }
+        
+        let newIndex = currentIndex + 1
+        let movedSong = favoriteSongs.remove(at: currentIndex)
+        favoriteSongs.insert(movedSong, at: newIndex)
+        
+        // Update playlist context if currently playing from favorites
+        updatePlaylistContextAfterReorder()
+        saveFavorites()
+    }
+    
+    // Convenience methods that take videoId
+    func moveFavoriteUp(videoId: String) {
+        guard let song = favoriteSongs.first(where: { $0.id == videoId }) else { return }
+        moveFavoriteUp(song)
+    }
+    
+    func moveFavoriteDown(videoId: String) {
+        guard let song = favoriteSongs.first(where: { $0.id == videoId }) else { return }
+        moveFavoriteDown(song)
+    }
+    
+    private func updatePlaylistContextAfterReorder() {
+        // Update playlist context if currently playing from favorites
+        if isPlayingFromPlaylist && currentPlaylist.count == favoriteSongs.count,
+           let nowPlayingSong = nowPlaying,
+           let newIndex = favoriteSongs.firstIndex(where: { $0.id == nowPlayingSong.id }) {
+            currentPlaylist = favoriteSongs
+            currentPlaylistIndex = newIndex
+            print("Updated favorites playlist context after reorder: index \(newIndex) of \(favoriteSongs.count)")
+        }
+    }
+    
     private func saveFavorites() {
         if let data = try? JSONEncoder().encode(favoriteSongs) {
             UserDefaults.standard.set(data, forKey: favoritesKey)

@@ -350,19 +350,37 @@ struct ContentView: View {
                         SectionHeader("Home · Favorites")
                         let favoritesToShow = expandedFavorites ? viewModel.favoriteSongs.count : min(viewModel.favoriteSongs.count, 8)
                         ForEach(Array(viewModel.favoriteSongs.prefix(favoritesToShow).enumerated()), id: \.element.id) { displayIndex, item in
-                            SongRow(item: item, isActive: viewModel.nowPlaying?.id == item.id, isFavorite: true, onPlay: {
-                                // Ensure we don't auto-scroll away when playing from favorites
-                                suppressNextAutoScroll = true
-                                // Play from the full favorites list and compute the correct index within it
-                                let fullFavorites = Array(viewModel.favoriteSongs)
-                                let fullIndex = fullFavorites.firstIndex(where: { $0.id == item.id }) ?? displayIndex
-                                print("Playing favorite: \(item.title) at index \(fullIndex) of \(fullFavorites.count) favorites")
-                                viewModel.play(song: item, fromPlaylist: fullFavorites, atIndex: fullIndex)
-                            }, onToggleFavorite: {
-                                viewModel.toggleFavorite(item)
-                            }, onDelete: {
-                                viewModel.toggleFavorite(item) // Remove from favorites
-                            })
+                            FavoriteSongRow(
+                                item: item, 
+                                isActive: viewModel.nowPlaying?.id == item.id, 
+                                canMoveUp: displayIndex > 0,
+                                canMoveDown: displayIndex < favoritesToShow - 1 && displayIndex < viewModel.favoriteSongs.count - 1,
+                                onPlay: {
+                                    // Ensure we don't auto-scroll away when playing from favorites
+                                    suppressNextAutoScroll = true
+                                    // Play from the full favorites list and compute the correct index within it
+                                    let fullFavorites = Array(viewModel.favoriteSongs)
+                                    let fullIndex = fullFavorites.firstIndex(where: { $0.id == item.id }) ?? displayIndex
+                                    print("Playing favorite: \(item.title) at index \(fullIndex) of \(fullFavorites.count) favorites")
+                                    viewModel.play(song: item, fromPlaylist: fullFavorites, atIndex: fullIndex)
+                                }, 
+                                onToggleFavorite: {
+                                    viewModel.toggleFavorite(item)
+                                }, 
+                                onDelete: {
+                                    viewModel.toggleFavorite(item) // Remove from favorites
+                                },
+                                onMoveUp: {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                        viewModel.moveFavoriteUp(item)
+                                    }
+                                },
+                                onMoveDown: {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                        viewModel.moveFavoriteDown(item)
+                                    }
+                                }
+                            )
                             .id("fav:\(item.id)")
                         }
                         if viewModel.favoriteSongs.count > 8 && !expandedFavorites {
@@ -1083,6 +1101,183 @@ private struct VideoRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct FavoriteSongRow: View {
+    let item: SongItem
+    let isActive: Bool
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onPlay: () -> Void
+    let onToggleFavorite: () -> Void
+    let onDelete: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+    
+    @State private var isHovered = false
+    @State private var showReorderControls = false
+    
+    var body: some View {
+        HStack(spacing: 0) {
+            // Main song content
+            Button(action: onPlay) {
+                HStack(spacing: 12) {
+                    if SettingsManager.shared.shouldShowThumbnails() {
+                        AsyncImage(url: item.thumbnail.flatMap(URL.init(string:))) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            case .failure(_), .empty:
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(.quaternary)
+                                    .overlay(
+                                        Image(systemName: "music.note")
+                                            .foregroundStyle(.secondary)
+                                            .font(.system(size: 16))
+                                    )
+                            @unknown default:
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(.quaternary)
+                            }
+                        }
+                        .frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    } else {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(.quaternary)
+                            .overlay(
+                                Image(systemName: "music.note")
+                                    .foregroundStyle(.secondary)
+                                    .font(.system(size: 16))
+                            )
+                            .frame(width: 44, height: 44)
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.title)
+                            .font(.system(size: 16, weight: .medium))
+                            .lineLimit(1)
+                            .foregroundStyle(isActive ? .primary : .primary)
+                        HStack(spacing: 4) {
+                            if let artists = item.artists, !artists.isEmpty { 
+                                Text(artists).foregroundStyle(.secondary) 
+                            }
+                            if let album = item.album, !album.isEmpty { 
+                                Text("·").foregroundStyle(.tertiary)
+                                Text(album).foregroundStyle(.secondary) 
+                            }
+                            if let duration = item.duration, !duration.isEmpty { 
+                                Text("·").foregroundStyle(.tertiary)
+                                Text(duration).foregroundStyle(.secondary) 
+                            }
+                        }.font(.system(size: 13)).lineLimit(1)
+                    }
+                    
+                    Spacer()
+                    
+                    HStack(spacing: 8) {
+                        Button(action: onToggleFavorite) {
+                            Image(systemName: "heart.fill")
+                                .foregroundStyle(.red)
+                                .font(.system(size: 16))
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(isHovered ? 1.0 : 1.0) // Always show for favorites
+                        
+                        Button(action: onDelete) {
+                            Image(systemName: "trash")
+                                .foregroundStyle(.red)
+                                .font(.system(size: 16))
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(isHovered ? 1.0 : 0.0)
+                        .help("Remove from favorites")
+                        
+                        if isActive { 
+                            Image(systemName: "speaker.wave.2.fill")
+                                .foregroundStyle(.blue)
+                                .font(.system(size: 16))
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isActive ? Color.blue.opacity(0.1) : (isHovered ? Color.primary.opacity(0.04) : .clear))
+            )
+            
+            // Reorder controls - appear on the right with animation
+            if showReorderControls {
+                VStack(spacing: 4) {
+                    Button(action: onMoveUp) {
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(canMoveUp ? .primary : .tertiary)
+                            .frame(width: 24, height: 20)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(.quaternary)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canMoveUp)
+                    .help("Move up")
+                    
+                    Button(action: onMoveDown) {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(canMoveDown ? .primary : .tertiary)
+                            .frame(width: 24, height: 20)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(.quaternary)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canMoveDown)
+                    .help("Move down")
+                }
+                .padding(.trailing, 8)
+                .transition(.asymmetric(
+                    insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .trailing).combined(with: .opacity)
+                ))
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.08)) {
+                isHovered = hovering
+            }
+        }
+        .onTapGesture(count: 2) {
+            // Double tap to play
+            onPlay()
+        }
+        .contextMenu {
+            Button("Move Up") {
+                onMoveUp()
+            }
+            .disabled(!canMoveUp)
+            
+            Button("Move Down") {
+                onMoveDown()
+            }
+            .disabled(!canMoveDown)
+            
+            Divider()
+            
+            Button("Remove from Favorites") {
+                onDelete()
+            }
+        }
+        // Note: Right-click context menu is handled by .contextMenu above
     }
 }
 
