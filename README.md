@@ -57,6 +57,15 @@ A modern macOS music player app built with SwiftUI that integrates with YouTube 
 
 3. Build and run the project (⌘+R)
 
+### Install from DMG
+1. Download the latest `.dmg` from the Releases page or build one via `PackagingResources/package.sh`.
+2. Open the DMG and drag `Spotlight Music.app` into the `Applications` folder.
+3. If macOS blocks the app due to quarantine, remove the quarantine attribute:
+
+```bash
+xattr -rd com.apple.quarantine "/Applications/Spotlight Music.app"
+```
+
 ## Usage
 
 ### Basic Search
