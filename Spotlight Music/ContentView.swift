@@ -8,6 +8,7 @@
 import SwiftUI
 import AVFoundation
 import AppKit
+import Foundation
 
 struct IdentifiableString: Identifiable {
     let id = UUID()
@@ -37,6 +38,7 @@ struct ContentView: View {
     @State private var expandedArtists = false
     @State private var expandedVideos = false
     @State private var expandedArtistAlbums = false
+    @State private var expandedFavorites = false
     @State private var suppressNextAutoScroll = false
     
     private var targetHeight: CGFloat {
@@ -78,15 +80,18 @@ struct ContentView: View {
             if viewModel.isLoadingDetails {
                 calculatedHeight += 60
             }
-        } else if viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        } else if viewModel.query.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
             // Home view - show now playing and favorites if available
             if viewModel.nowPlaying != nil {
                 calculatedHeight += sectionHeaderHeight + 8 + rowHeight // Now Playing section
             }
             if !viewModel.favoriteSongs.isEmpty {
                 calculatedHeight += sectionHeaderHeight + 8 // Header + spacing
-                let visibleFavorites = min(viewModel.favoriteSongs.count, 8)
+                let visibleFavorites = expandedFavorites ? viewModel.favoriteSongs.count : min(viewModel.favoriteSongs.count, 8)
                 calculatedHeight += CGFloat(visibleFavorites) * rowHeight
+                if viewModel.favoriteSongs.count > 8 && !expandedFavorites {
+                    calculatedHeight += showAllButtonHeight
+                }
             }
         } else {
             // Search results or searching state
@@ -143,15 +148,19 @@ struct ContentView: View {
     }
 
     var body: some View {
-        mainContent
+        let content = mainContent
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
-            )
+        
+        let overlayShape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .stroke(Color.black.opacity(0.08), lineWidth: 1)
+        
+        let styledContent = content
+            .overlay(overlayShape)
             .padding(12)
             .background(WindowConfigurator())
+        
+        let finalContent = styledContent
             .onChange(of: targetHeight) { _, newHeight in
                 updateAnimatedHeight(newHeight)
             }
@@ -173,10 +182,12 @@ struct ContentView: View {
             .alert(item: errorBinding) { (item: IdentifiableString) in
                 Alert(title: Text("Error"), message: Text(item.value))
             }
-            .onKeyPress(.escape) {
+            .onKeyPress(KeyEquivalent.escape) {
                 handleEscapeKey()
                 return .handled
             }
+        
+        return finalContent
     }
     
     private var mainContent: some View {
@@ -214,6 +225,7 @@ struct ContentView: View {
         expandedArtists = false
         expandedVideos = false
         expandedArtistAlbums = false
+        expandedFavorites = false
     }
 
     private func ensureVisibleNowPlaying() {
@@ -240,6 +252,20 @@ struct ContentView: View {
                         withAnimation(.easeInOut(duration: 0.2)) { expandedVideos = true }
                     } else {
                         expandedVideos = true
+                    }
+                }
+            }
+        }
+        
+        // Same for favorites section
+        if !expandedFavorites && viewModel.query.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+            if let favIdx = viewModel.favoriteSongs.firstIndex(where: { $0.id == nowId }) {
+                let collapsedLimit = min(viewModel.favoriteSongs.count, 8)
+                if favIdx >= collapsedLimit {
+                    if settings.shouldEnableAnimations() {
+                        withAnimation(.easeInOut(duration: 0.2)) { expandedFavorites = true }
+                    } else {
+                        expandedFavorites = true
                     }
                 }
             }
@@ -301,12 +327,19 @@ struct ContentView: View {
                 } else if let selectedArtist = viewModel.selectedArtist {
                     // Artist detail view
                     artistDetailView(selectedArtist)
-                } else if viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                } else if viewModel.query.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
                     // Home view
                     if let nowPlaying = viewModel.nowPlaying {
                         SectionHeader("Now Playing")
                         SongRow(item: nowPlaying, isActive: true, isFavorite: viewModel.isFavorite(nowPlaying), onPlay: {
-                            // Already playing, could pause/resume here
+                            // Pause/resume current playback while maintaining playlist context
+                            if let player = viewModel.currentPlayer {
+                                if player.rate > 0 {
+                                    player.pause()
+                                } else {
+                                    player.play()
+                                }
+                            }
                         }, onToggleFavorite: {
                             viewModel.toggleFavorite(nowPlaying)
                         })
@@ -315,18 +348,29 @@ struct ContentView: View {
                     
                     if !viewModel.favoriteSongs.isEmpty {
                         SectionHeader("Home · Favorites")
-                        ForEach(Array(viewModel.favoriteSongs.prefix(8).enumerated()), id: \.element.id) { index, item in
+                        let favoritesToShow = expandedFavorites ? viewModel.favoriteSongs.count : min(viewModel.favoriteSongs.count, 8)
+                        ForEach(Array(viewModel.favoriteSongs.prefix(favoritesToShow).enumerated()), id: \.element.id) { displayIndex, item in
                             SongRow(item: item, isActive: viewModel.nowPlaying?.id == item.id, isFavorite: true, onPlay: {
                                 // Ensure we don't auto-scroll away when playing from favorites
                                 suppressNextAutoScroll = true
                                 // Play from the full favorites list and compute the correct index within it
                                 let fullFavorites = Array(viewModel.favoriteSongs)
-                                let fullIndex = fullFavorites.firstIndex(where: { $0.id == item.id }) ?? index
+                                let fullIndex = fullFavorites.firstIndex(where: { $0.id == item.id }) ?? displayIndex
+                                print("Playing favorite: \(item.title) at index \(fullIndex) of \(fullFavorites.count) favorites")
                                 viewModel.play(song: item, fromPlaylist: fullFavorites, atIndex: fullIndex)
                             }, onToggleFavorite: {
                                 viewModel.toggleFavorite(item)
+                            }, onDelete: {
+                                viewModel.toggleFavorite(item) // Remove from favorites
                             })
                             .id("fav:\(item.id)")
+                        }
+                        if viewModel.favoriteSongs.count > 8 && !expandedFavorites {
+                            ShowAllButton(count: viewModel.favoriteSongs.count, type: "Favorites") {
+                                withAnimation(.easeInOut(duration: 0.3)) {
+                                    expandedFavorites = true
+                                }
+                            }
                         }
                     }
                 } else {
@@ -460,7 +504,7 @@ struct ContentView: View {
             viewModel.clearDetails()
         }
         // If we're in search results with a query, clear the search to go to home
-        else if !viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        else if !viewModel.query.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
             viewModel.updateQuery("")
         }
         // If we're already at home, do nothing (or could minimize/hide the app)
@@ -693,7 +737,17 @@ private struct SongRow: View {
     let isFavorite: Bool
     let onPlay: () -> Void
     let onToggleFavorite: () -> Void
+    let onDelete: (() -> Void)?
     @State private var isHovered = false
+    
+    init(item: SongItem, isActive: Bool, isFavorite: Bool, onPlay: @escaping () -> Void, onToggleFavorite: @escaping () -> Void, onDelete: (() -> Void)? = nil) {
+        self.item = item
+        self.isActive = isActive
+        self.isFavorite = isFavorite
+        self.onPlay = onPlay
+        self.onToggleFavorite = onToggleFavorite
+        self.onDelete = onDelete
+    }
 
     var body: some View {
         Button(action: onPlay) {
@@ -762,6 +816,17 @@ private struct SongRow: View {
                     .buttonStyle(.plain)
                     .opacity(isHovered || isFavorite ? 1.0 : 0.0)
                     
+                    if let onDelete = onDelete {
+                        Button(action: onDelete) {
+                            Image(systemName: "trash")
+                                .foregroundStyle(.red)
+                                .font(.system(size: 16))
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(isHovered ? 1.0 : 0.0)
+                        .help("Remove from favorites")
+                    }
+                    
                     if isActive { 
                         Image(systemName: "speaker.wave.2.fill")
                             .foregroundStyle(.blue)
@@ -781,6 +846,18 @@ private struct SongRow: View {
                 }
             }
             .contentShape(Rectangle())
+            .onAppear {
+                if isActive {
+                    print("🔵 SongRow for '\(item.title)' is marked as active")
+                }
+            }
+            .onChange(of: isActive) { _, newValue in
+                if newValue {
+                    print("🔵 SongRow for '\(item.title)' became active")
+                } else {
+                    print("⚫ SongRow for '\(item.title)' became inactive")
+                }
+            }
         }
         .buttonStyle(.plain)
     }

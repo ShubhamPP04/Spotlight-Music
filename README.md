@@ -12,8 +12,9 @@ A modern macOS music player app built with SwiftUI that integrates with YouTube 
 ### 🎧 Playback
 - **Audio Streaming**: High-quality audio playback from YouTube Music
 - **Media Controls**: Full integration with macOS media controls (menu bar, Control Center)
-- **Auto-play**: Seamless track progression within playlists
+- **Auto-play**: Seamless track progression within playlists and intelligent auto-play across all contexts
 - **Instant Switching**: Immediate song switching with no overlap
+- **Smart Context Detection**: Automatically detects playlist context from favorites, search results, albums, and artist tracks
 
 ### 🎛️ Navigation
 - **Previous/Next**: Navigate through playlists with media keys
@@ -81,10 +82,14 @@ xattr -rd com.apple.quarantine "/Applications/Spotlight Music.app"
 ### Favorites
 - Click the heart icon on any song to add it to favorites
 - Access favorites from the home screen when no search is active
+- Hover over any favorite song to see the delete (trash) icon to remove it from favorites
+- Auto-play continues seamlessly through your favorites list
+- Media controls (Next/Previous) work within favorites
 
 ### Album & Artist Exploration
-- Click on any album to view its complete tracklist
-- Click on any artist to see their top songs and albums
+- Click on any album to view its complete tracklist with full auto-play support
+- Click on any artist to see their top songs and albums with seamless auto-play
+- Auto-play continues through entire albums and artist song collections
 - Use the back button or ESC key to return to search results
 
 ## Architecture
