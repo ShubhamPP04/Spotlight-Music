@@ -370,6 +370,7 @@ final class AppViewModel: ObservableObject {
                     Task { @MainActor in
                         if !self.didTriggerEndForCurrentItem {
                             self.didTriggerEndForCurrentItem = true
+                            print("Song ended via notification observer")
                             self.handleSongEnded()
                         }
                     }
@@ -387,14 +388,21 @@ final class AppViewModel: ObservableObject {
         MPNowPlayingInfoCenter.default().playbackState = .stopped
         
         // Respect user setting for auto-play next
-        if !SettingsManager.shared.autoPlayNext { return }
+        guard SettingsManager.shared.autoPlayNext else { 
+            print("Auto-play next is disabled")
+            return 
+        }
 
         // Auto-play next song if playing from a playlist
-        if isPlayingFromPlaylist && currentPlaylistIndex >= 0 && currentPlaylistIndex < currentPlaylist.count - 1 {
-            let nextIndex = currentPlaylistIndex + 1
-            let nextSong = currentPlaylist[nextIndex]
-            play(song: nextSong, fromPlaylist: currentPlaylist, atIndex: nextIndex)
+        guard isPlayingFromPlaylist && currentPlaylistIndex >= 0 && currentPlaylistIndex < currentPlaylist.count - 1 else {
+            print("Cannot auto-play next: isPlayingFromPlaylist=\(isPlayingFromPlaylist), currentPlaylistIndex=\(currentPlaylistIndex), playlistCount=\(currentPlaylist.count)")
+            return
         }
+        
+        let nextIndex = currentPlaylistIndex + 1
+        let nextSong = currentPlaylist[nextIndex]
+        print("Auto-playing next song: \(nextSong.title) at index \(nextIndex)")
+        play(song: nextSong, fromPlaylist: currentPlaylist, atIndex: nextIndex)
     }
     
     private func playNextTrack() {
@@ -420,8 +428,8 @@ final class AppViewModel: ObservableObject {
     
     private func observePlaybackProgress() {
         guard let player = player else { return }
-        // Reduce update frequency to every 10 seconds to save energy
-        let interval = CMTime(seconds: 10, preferredTimescale: 1)
+        // Use more frequent updates for reliable end-of-song detection
+        let interval = CMTime(seconds: 1, preferredTimescale: 1)
         timeObserverToken = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] currentTime in
             guard let self else { return }
 
@@ -429,37 +437,40 @@ final class AppViewModel: ObservableObject {
             let rate = player.rate
 
             Task { @MainActor in
-                // Only update if there's a significant change (save energy)
+                // Update Now Playing info less frequently to save energy
                 let timeDiff = abs(currentSeconds - self.lastProgressUpdate)
                 let rateDiff = abs(rate - self.lastPlaybackRate)
-                guard timeDiff > 5.0 || rateDiff > 0.1 else { return }
+                let shouldUpdateNowPlaying = timeDiff > 5.0 || rateDiff > 0.1
 
-                self.lastProgressUpdate = currentSeconds
-                self.lastPlaybackRate = rate
+                if shouldUpdateNowPlaying {
+                    self.lastProgressUpdate = currentSeconds
+                    self.lastPlaybackRate = rate
 
-                var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-                // If duration wasn't known at start (e.g., artist page items), try to fill from the player item once available
-                if info[MPMediaItemPropertyPlaybackDuration] == nil || (info[MPMediaItemPropertyPlaybackDuration] as? Double ?? 0) <= 0 {
-                    if let durationTime = self.player?.currentItem?.duration {
-                        let total = CMTimeGetSeconds(durationTime)
-                        if total.isFinite && total > 0 {
-                            info[MPMediaItemPropertyPlaybackDuration] = total
+                    var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+                    // If duration wasn't known at start (e.g., artist page items), try to fill from the player item once available
+                    if info[MPMediaItemPropertyPlaybackDuration] == nil || (info[MPMediaItemPropertyPlaybackDuration] as? Double ?? 0) <= 0 {
+                        if let durationTime = self.player?.currentItem?.duration {
+                            let total = CMTimeGetSeconds(durationTime)
+                            if total.isFinite && total > 0 {
+                                info[MPMediaItemPropertyPlaybackDuration] = total
+                            }
                         }
                     }
+                    info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentSeconds
+                    info[MPNowPlayingInfoPropertyPlaybackRate] = rate
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+                    MPNowPlayingInfoCenter.default().playbackState = rate > 0 ? .playing : .paused
                 }
-                info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentSeconds
-                info[MPNowPlayingInfoPropertyPlaybackRate] = rate
-                MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-                MPNowPlayingInfoCenter.default().playbackState = rate > 0 ? .playing : .paused
 
-                // Fallback: if we are within 1s of the end, auto-advance once
+                // Always check for end-of-song with auto-play enabled
                 if SettingsManager.shared.autoPlayNext,
                    self.isPlayingFromPlaylist,
                    let durationTime = self.player?.currentItem?.duration,
                    durationTime.isNumeric,
                    CMTimeGetSeconds(durationTime).isFinite {
                     let total = CMTimeGetSeconds(durationTime)
-                    if total > 0, total - currentSeconds <= 1.0, !self.didTriggerEndForCurrentItem {
+                    if total > 0, total - currentSeconds <= 2.0, !self.didTriggerEndForCurrentItem {
+                        print("Song ending via fallback mechanism - total: \(total), current: \(currentSeconds), remaining: \(total - currentSeconds)")
                         self.didTriggerEndForCurrentItem = true
                         self.handleSongEnded()
                     }
