@@ -515,12 +515,32 @@ final class AppViewModel: ObservableObject {
         }
         
         // STEP 1: PRIORITIZE CURRENT PLAYLIST CONTEXT - This is the most reliable
+        print("🔍 Checking saved playlist context:")
+        print("   - isPlayingFromPlaylist: \(isPlayingFromPlaylist)")
+        print("   - currentPlaylist.count: \(currentPlaylist.count)")
+        print("   - currentPlaylistIndex: \(currentPlaylistIndex)")
+        print("   - Next index would be: \(currentPlaylistIndex + 1)")
+        
         if isPlayingFromPlaylist && !currentPlaylist.isEmpty && currentPlaylistIndex >= 0 && currentPlaylistIndex < currentPlaylist.count - 1 {
             let nextIndex = currentPlaylistIndex + 1
             let nextSong = currentPlaylist[nextIndex]
             print("✅ Using saved playlist context: \(nextSong.title) at index \(nextIndex)")
             play(song: nextSong, fromPlaylist: currentPlaylist, atIndex: nextIndex)
             return
+        } else {
+            print("❌ Saved playlist context failed:")
+            if !isPlayingFromPlaylist {
+                print("   - Not playing from playlist")
+            }
+            if currentPlaylist.isEmpty {
+                print("   - Current playlist is empty")
+            }
+            if currentPlaylistIndex < 0 {
+                print("   - Invalid current index (< 0)")
+            }
+            if currentPlaylistIndex >= currentPlaylist.count - 1 {
+                print("   - At end of playlist (index \(currentPlaylistIndex) >= \(currentPlaylist.count - 1))")
+            }
         }
         
         // STEP 2: If playlist context is broken, try to rebuild it aggressively
@@ -552,7 +572,23 @@ final class AppViewModel: ObservableObject {
             }
         }
         
-        // SEARCH RESULTS: Try search results FIRST (most common case for user complaint)
+        // 1. Try album songs FIRST (highest priority for auto-play continuity)
+        if !albumSongs.isEmpty {
+            if let currentIndex = albumSongs.firstIndex(where: { $0.id == currentSong.id }) {
+                if currentIndex < albumSongs.count - 1 {
+                    let nextSong = albumSongs[currentIndex + 1]
+                    print("✅ ALBUM: Playing \(nextSong.title) at index \(currentIndex + 1)")
+                    play(song: nextSong, fromPlaylist: albumSongs, atIndex: currentIndex + 1)
+                    return
+                } else {
+                    print("📝 At end of album songs (\(albumSongs.count) songs)")
+                }
+            } else {
+                print("📝 Current song not found in album songs")
+            }
+        }
+        
+        // SEARCH RESULTS: Try search results as fallback
         if !songs.isEmpty {
             if let currentIndex = songs.firstIndex(where: { $0.id == currentSong.id }) {
                 if currentIndex < songs.count - 1 {
@@ -565,18 +601,6 @@ final class AppViewModel: ObservableObject {
                 }
             } else {
                 print("📝 Current song not found in search results")
-            }
-        }
-        
-        // 1. Try album songs
-        if !albumSongs.isEmpty {
-            if let currentIndex = albumSongs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < albumSongs.count - 1 {
-                    let nextSong = albumSongs[currentIndex + 1]
-                    print("✅ ALBUM: Playing \(nextSong.title)")
-                    play(song: nextSong, fromPlaylist: albumSongs, atIndex: currentIndex + 1)
-                    return
-                }
             }
         }
         
