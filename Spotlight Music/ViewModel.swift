@@ -293,12 +293,18 @@ final class AppViewModel: ObservableObject {
     func performSearch(_ q: String) async {
         let trimmed = q.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
+            // IMPORTANT: Clear detail views when search is cleared to return to main view
+            clearDetails()
             self.songs = []
             self.albums = []
             self.artists = []
             self.videos = []
             return
         }
+        
+        // IMPORTANT: Clear detail views when performing search to return to main search results
+        // This ensures that if user is on album/artist page and searches, they see search results
+        clearDetails()
         
         // Check cache first to save energy
         if let cachedResult = searchCache[trimmed] {
