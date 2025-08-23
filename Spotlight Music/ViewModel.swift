@@ -124,6 +124,9 @@ final class AppViewModel: ObservableObject {
         return nil
     }
 
+    private let ytDlpUpdateKey = "ytDlpLastUpdated"
+    private let ytDlpUpdateInterval: TimeInterval = 24 * 60 * 60 // 24 hours
+    
     private func ensurePythonSiteInstalled() async {
         let fm = FileManager.default
         guard let python = selectPythonExec() else {
@@ -139,17 +142,86 @@ final class AppViewModel: ObservableObject {
             let (_, out, _) = (try? await runProcess(exec: python, args: ["-c", code])) ?? (1, "", "")
             return out.contains("OK")
         }
-        if await modulesReady() { return }
+        
+        // If modules are already ready, check if we need to update yt-dlp
+        if await modulesReady() {
+            await updateYtDlpIfNeeded()
+            return
+        }
 
         // Try to ensure pip exists
         _ = try? await runProcess(exec: python, args: ["-m", "ensurepip", "--upgrade"]) 
 
+        // Install/upgrade packages with better error handling
+        let packagesToInstall = [
+            "yt-dlp>=2024.8.6",  // Ensure recent version
+            "ytmusicapi>=1.7.0"   // Ensure recent version
+        ]
+        
         // Prefer offline wheels from bundle
         if let wheelsDir = Bundle.main.resourceURL?.appendingPathComponent("PythonWheels").path,
            fm.fileExists(atPath: wheelsDir) {
-            _ = try? await runProcess(exec: python, args: ["-m", "pip", "install", "--no-index", "--find-links", wheelsDir, "--target", siteDir, "ytmusicapi", "yt-dlp"]) 
+            for package in packagesToInstall {
+                _ = try? await runProcess(exec: python, args: ["-m", "pip", "install", "--no-index", "--find-links", wheelsDir, "--target", siteDir, "--upgrade", package]) 
+            }
         } else {
-            _ = try? await runProcess(exec: python, args: ["-m", "pip", "install", "--target", siteDir, "ytmusicapi", "yt-dlp"]) 
+            // Online installation with upgrade
+            for package in packagesToInstall {
+                _ = try? await runProcess(exec: python, args: ["-m", "pip", "install", "--target", siteDir, "--upgrade", package]) 
+            }
+        }
+        
+        // Mark yt-dlp as updated after fresh installation
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: ytDlpUpdateKey)
+    }
+    
+    private func updateYtDlpIfNeeded() async {
+        // Check if we've updated yt-dlp recently
+        let lastUpdated = UserDefaults.standard.double(forKey: ytDlpUpdateKey)
+        let now = Date().timeIntervalSince1970
+        
+        // Only update if it's been more than 24 hours since last update or never updated
+        guard lastUpdated == 0 || (now - lastUpdated) > ytDlpUpdateInterval else {
+            print("yt-dlp recently updated, skipping automatic update")
+            return
+        }
+        
+        guard let python = selectPythonExec() else { return }
+        let siteDir = sitePackagesPath()
+        
+        // Check yt-dlp version
+        let versionCode = "import sys; sys.path.insert(0, r'\(siteDir)'); import yt_dlp; print(yt_dlp.version.__version__)"
+        let (_, versionOut, _) = (try? await runProcess(exec: python, args: ["-c", versionCode])) ?? (1, "", "")
+        
+        print("Current yt-dlp version: \(versionOut.trimmingCharacters(in: .whitespacesAndNewlines))")
+        print("Updating yt-dlp to latest version (first run or 24h interval)...")
+        
+        let result = (try? await runProcess(exec: python, args: ["-m", "pip", "install", "--target", siteDir, "--upgrade", "yt-dlp"])) ?? (1, "", "")
+        let exitCode = result.0
+        
+        // Only mark as updated if the update was successful
+        if exitCode == 0 {
+            UserDefaults.standard.set(now, forKey: ytDlpUpdateKey)
+            print("yt-dlp update completed successfully")
+        } else {
+            print("yt-dlp update failed, will retry on next run")
+        }
+    }
+    
+    // Method to force update yt-dlp when extraction failures occur
+    private func forceUpdateYtDlp() async {
+        guard let python = selectPythonExec() else { return }
+        let siteDir = sitePackagesPath()
+        
+        print("Forcing yt-dlp update due to extraction failure...")
+        let result = (try? await runProcess(exec: python, args: ["-m", "pip", "install", "--target", siteDir, "--upgrade", "--force-reinstall", "yt-dlp"])) ?? (1, "", "")
+        let exitCode = result.0
+        
+        if exitCode == 0 {
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: ytDlpUpdateKey)
+            print("Force update completed successfully")
+        } else {
+            print("Force update failed")
         }
     }
 
@@ -395,6 +467,156 @@ final class AppViewModel: ObservableObject {
         )
     }
     
+    // MARK: - Web-based Stream Extraction
+    private func extractStreamURLFromWeb(videoId: String) async -> String? {
+        // Try multiple web-based extraction methods
+        
+        // Method 1: YouTube embed page
+        if let url = await tryYouTubeEmbed(videoId: videoId) {
+            return url
+        }
+        
+        // Method 2: YouTube watch page
+        if let url = await tryYouTubeWatchPage(videoId: videoId) {
+            return url
+        }
+        
+        // Method 3: Try alternative video info API
+        if let url = await tryVideoInfoAPI(videoId: videoId) {
+            return url
+        }
+        
+        return nil
+    }
+    
+    private func tryYouTubeEmbed(videoId: String) async -> String? {
+        do {
+            let embedURL = URL(string: "https://www.youtube.com/embed/\(videoId)")!
+            var request = URLRequest(url: embedURL)
+            request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+            request.timeoutInterval = 15
+            
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let html = String(data: data, encoding: .utf8) ?? ""
+            
+            // Try to extract ytInitialPlayerResponse
+            return extractPlayerResponse(from: html)
+        } catch {
+            print("YouTube embed extraction failed: \(error)")
+            return nil
+        }
+    }
+    
+    private func tryYouTubeWatchPage(videoId: String) async -> String? {
+        do {
+            let watchURL = URL(string: "https://www.youtube.com/watch?v=\(videoId)")!
+            var request = URLRequest(url: watchURL)
+            request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+            request.timeoutInterval = 15
+            
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let html = String(data: data, encoding: .utf8) ?? ""
+            
+            return extractPlayerResponse(from: html)
+        } catch {
+            print("YouTube watch page extraction failed: \(error)")
+            return nil
+        }
+    }
+    
+    private func tryVideoInfoAPI(videoId: String) async -> String? {
+        do {
+            // Try the get_video_info endpoint (may be deprecated but sometimes still works)
+            let infoURL = URL(string: "https://www.youtube.com/get_video_info?video_id=\(videoId)")!
+            var request = URLRequest(url: infoURL)
+            request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+            request.timeoutInterval = 10
+            
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let response = String(data: data, encoding: .utf8) ?? ""
+            
+            // Parse URL-encoded response
+            var components = URLComponents()
+            components.query = response
+            let queryItems = components.queryItems ?? []
+            
+            for item in queryItems {
+                if item.name == "player_response", 
+                   let value = item.value,
+                   let data = value.data(using: .utf8),
+                   let playerResponse = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    return extractStreamURL(from: playerResponse)
+                }
+            }
+        } catch {
+            print("Video info API extraction failed: \(error)")
+        }
+        return nil
+    }
+    
+    private func extractPlayerResponse(from html: String) -> String? {
+        // Try multiple patterns for player response
+        let patterns = [
+            "ytInitialPlayerResponse\\s*=\\s*(\\{.+?\\});",
+            "var\\s+ytInitialPlayerResponse\\s*=\\s*(\\{.+?\\});",
+            "window\\[\"ytInitialPlayerResponse\"\\]\\s*=\\s*(\\{.+?\\});"
+        ]
+        
+        for pattern in patterns {
+            if let range = html.range(of: pattern, options: .regularExpression) {
+                let match = String(html[range])
+                if let jsonStart = match.firstIndex(of: "{") {
+                    let jsonString = String(match[jsonStart...])
+                        .replacingOccurrences(of: ";$", with: "", options: .regularExpression)
+                    
+                    if let jsonData = jsonString.data(using: .utf8),
+                       let playerResponse = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                        return extractStreamURL(from: playerResponse)
+                    }
+                }
+            }
+        }
+        return nil
+    }
+    
+    private func extractStreamURL(from playerResponse: [String: Any]) -> String? {
+        guard let streamingData = playerResponse["streamingData"] as? [String: Any] else {
+            return nil
+        }
+        
+        // Try adaptive formats first (audio-only preferred)
+        if let adaptiveFormats = streamingData["adaptiveFormats"] as? [[String: Any]] {
+            // Sort audio formats by bitrate (highest first)
+            let audioFormats = adaptiveFormats.filter { format in
+                if let mimeType = format["mimeType"] as? String {
+                    return mimeType.hasPrefix("audio/")
+                }
+                return false
+            }.sorted { format1, format2 in
+                let bitrate1 = format1["bitrate"] as? Int ?? format1["averageBitrate"] as? Int ?? 0
+                let bitrate2 = format2["bitrate"] as? Int ?? format2["averageBitrate"] as? Int ?? 0
+                return bitrate1 > bitrate2
+            }
+            
+            for format in audioFormats {
+                if let url = format["url"] as? String {
+                    return url
+                }
+            }
+        }
+        
+        // Fallback to regular formats
+        if let formats = streamingData["formats"] as? [[String: Any]] {
+            for format in formats {
+                if let url = format["url"] as? String {
+                    return url
+                }
+            }
+        }
+        
+        return nil
+    }
+    
     func play(song: SongItem, fromPlaylist playlist: [SongItem]?, atIndex index: Int) {
         // Stop current playback immediately
         player?.pause()
@@ -453,54 +675,84 @@ final class AppViewModel: ObservableObject {
         MPNowPlayingInfoCenter.default().playbackState = .interrupted
         
         Task {
-            do {
-                let json = try await runHelper(arguments: ["stream_url", song.id])
-                if let error = json["error"] as? String {
-                    await MainActor.run { 
-                        self.errorMessage = error
-                        MPNowPlayingInfoCenter.default().playbackState = .stopped
+            var streamURL: URL?
+            var errorMsg: String?
+            var retryCount = 0
+            let maxRetries = 1 // Only retry once with yt-dlp update
+            
+            while streamURL == nil && retryCount <= maxRetries {
+                // First try: Python helper with yt-dlp
+                do {
+                    let json = try await runHelper(arguments: ["stream_url", song.id])
+                    if let error = json["error"] as? String {
+                        print("⚠️ Python extraction failed (attempt \(retryCount + 1)): \(error)")
+                        errorMsg = error
+                    } else if let urlString = json["stream_url"] as? String, let url = URL(string: urlString) {
+                        streamURL = url
+                        print("✅ Python extraction succeeded on attempt \(retryCount + 1)")
+                        break
                     }
-                    return
-                }
-                guard let urlString = json["stream_url"] as? String, let url = URL(string: urlString) else {
-                    await MainActor.run { 
-                        self.errorMessage = "Invalid stream URL"
-                        MPNowPlayingInfoCenter.default().playbackState = .stopped
-                    }
-                    return
+                } catch {
+                    print("⚠️ Python helper failed (attempt \(retryCount + 1)): \(error)")
+                    errorMsg = error.localizedDescription
                 }
                 
-                // Create new player and start playback
-                let item = AVPlayerItem(url: url)
-                let player = AVPlayer(playerItem: item)
-                self.player = player
-                player.play()
-                self.didTriggerEndForCurrentItem = false
-
-                await self.configureNowPlaying(for: song, streamURL: url)
-                self.observePlaybackProgress()
-                self.configureRemoteCommandCenter()
-                self.endObserverToken = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-                    guard let self else { return }
-                    Task { @MainActor in
-                        if !self.didTriggerEndForCurrentItem {
-                            self.didTriggerEndForCurrentItem = true
-                            print("🔥 Song ended via AVPlayer notification - triggering auto-play")
-                            self.handleSongEnded()
-                        }
+                // Second try: Swift web-based fallback
+                if streamURL == nil {
+                    print("🌐 Trying web-based extraction fallback...")
+                    if let webURL = await self.extractStreamURLFromWeb(videoId: song.id) {
+                        streamURL = URL(string: webURL)
+                        print("✅ Web extraction succeeded")
+                        break
+                    } else {
+                        print("❌ Web extraction also failed")
                     }
                 }
                 
-                // BACKUP: Monitor playback time to detect end (fallback if notification fails)
-                Task {
-                    await MainActor.run {
-                        self.monitorPlaybackEnd(for: item)
-                    }
+                // If both methods failed on first attempt, try updating yt-dlp and retry
+                if streamURL == nil && retryCount == 0 {
+                    print("🔄 All extraction methods failed, forcing yt-dlp update and retrying...")
+                    await self.forceUpdateYtDlp()
+                    retryCount += 1
+                } else {
+                    break
                 }
-            } catch {
+            }
+            
+            // Handle final result
+            guard let url = streamURL else {
                 await MainActor.run { 
-                    self.errorMessage = error.localizedDescription
+                    self.errorMessage = errorMsg ?? "Could not extract stream URL using any method after \(retryCount + 1) attempts"
                     MPNowPlayingInfoCenter.default().playbackState = .stopped
+                }
+                return
+            }
+            
+            // Create new player and start playback
+            let item = AVPlayerItem(url: url)
+            let player = AVPlayer(playerItem: item)
+            self.player = player
+            player.play()
+            self.didTriggerEndForCurrentItem = false
+
+            await self.configureNowPlaying(for: song, streamURL: url)
+            self.observePlaybackProgress()
+            self.configureRemoteCommandCenter()
+            self.endObserverToken = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    if !self.didTriggerEndForCurrentItem {
+                        self.didTriggerEndForCurrentItem = true
+                        print("🔥 Song ended via AVPlayer notification - triggering auto-play")
+                        self.handleSongEnded()
+                    }
+                }
+            }
+            
+            // BACKUP: Monitor playback time to detect end (fallback if notification fails)
+            Task {
+                await MainActor.run {
+                    self.monitorPlaybackEnd(for: item)
                 }
             }
         }
@@ -1256,28 +1508,131 @@ def handle_search(q: str):
         print(json.dumps({"error": f"Search failed: {e}"}))
 
 def handle_stream_url(video_id: str):
+    \"\"\"Extract stream URL with fallback methods for reliability.\"\"\"
+    # Try yt-dlp first with multiple format options
     try:
         from yt_dlp import YoutubeDL
+        
+        # Multiple format strategies
+        format_strategies = [
+            "bestaudio[ext=m4a]/best[height<=480]/best",
+            "bestaudio/best[height<=720]/best", 
+            "worst[height<=480]/worst",
+            "best/worst"
+        ]
+        
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        for fmt_strategy in format_strategies:
+            try:
+                ydl_opts = {
+                    "format": fmt_strategy,
+                    "quiet": True,
+                    "noplaylist": True,
+                    "nocheckcertificate": True,
+                    "no_warnings": True,
+                    "extractaudio": True,
+                    "audioformat": "best",
+                    # Add more robust options
+                    "ignoreerrors": True,
+                    "no_check_certificate": True,
+                    "geo_bypass": True,
+                    "prefer_insecure": True
+                }
+                
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    
+                    # Multiple ways to get stream URL
+                    stream_url = None
+                    
+                    # Method 1: Direct URL
+                    if "url" in info and info["url"]:
+                        stream_url = info["url"]
+                    
+                    # Method 2: From formats
+                    elif "formats" in info:
+                        fmts = info.get("formats", [])
+                        
+                        # Prefer audio-only formats
+                        audio_fmts = [f for f in fmts if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+                        if audio_fmts:
+                            # Sort by quality
+                            audio_fmts.sort(key=lambda f: f.get("abr", 0), reverse=True)
+                            stream_url = audio_fmts[0].get("url")
+                        
+                        # Fallback to any format with audio
+                        if not stream_url:
+                            audio_any = [f for f in fmts if f.get("acodec") != "none" and f.get("url")]
+                            if audio_any:
+                                audio_any.sort(key=lambda f: f.get("abr", 0), reverse=True)
+                                stream_url = audio_any[0]["url"]
+                    
+                    if stream_url:
+                        print(json.dumps({"stream_url": stream_url}))
+                        return
+                        
+            except Exception as fmt_error:
+                # Continue to next format strategy
+                continue
+                
+    except ImportError:
+        # yt-dlp not available, try web-based approach
+        pass
     except Exception as e:
-        print(json.dumps({"error": f"yt-dlp not available: {e}"}))
-        return
-    ydl_opts = {"format": "bestaudio[ext=m4a]/bestaudio/best", "quiet": True, "noplaylist": True, "nocheckcertificate": True}
-    url = f"https://www.youtube.com/watch?v={video_id}"
+        # Log the error but try fallback
+        pass
+    
+    # Web-based fallback using YouTube's embed API
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            su = info.get("url")
-            if not su:
-                fmts = info.get("formats") or []
-                af = [f for f in fmts if f.get("acodec") and f.get("vcodec") == "none"]
-                af.sort(key=lambda f: f.get("abr") or 0, reverse=True)
-                su = af[0]["url"] if af else None
-            if not su:
-                print(json.dumps({"error": "No stream URL found"}))
-                return
-            print(json.dumps({"stream_url": su}))
-    except Exception as e:
-        print(json.dumps({"error": f"Extraction failed: {e}"}))
+        import urllib.request
+        import urllib.parse
+        import re
+        
+        # Try YouTube embed page which often has accessible formats
+        embed_url = f"https://www.youtube.com/embed/{video_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+        
+        request = urllib.request.Request(embed_url, headers=headers)
+        with urllib.request.urlopen(request, timeout=10) as response:
+            html = response.read().decode('utf-8')
+            
+            # Extract player config
+            player_match = re.search(r'ytInitialPlayerResponse\\s*=\\s*(\\{.+?\\});', html)
+            if player_match:
+                import json as json_lib
+                player_data = json_lib.loads(player_match.group(1))
+                
+                streaming_data = player_data.get('streamingData', {})
+                formats = streaming_data.get('formats', []) + streaming_data.get('adaptiveFormats', [])
+                
+                # Find audio format
+                for fmt in formats:
+                    if fmt.get('mimeType', '').startswith('audio/') and fmt.get('url'):
+                        print(json_lib.dumps({"stream_url": fmt['url']}))
+                        return
+    
+    except Exception as web_error:
+        pass
+    
+    # Final fallback: Use YouTube Music direct if available
+    try:
+        ytm = load_ytmusic()
+        if ytm:
+            # Try to get song info and use that
+            song_info = ytm.get_song(video_id)
+            if song_info and 'streamingData' in song_info:
+                formats = song_info['streamingData'].get('adaptiveFormats', [])
+                for fmt in formats:
+                    if fmt.get('mimeType', '').startswith('audio/') and fmt.get('url'):
+                        print(json.dumps({"stream_url": fmt['url']}))
+                        return
+    except:
+        pass
+    
+    print(json.dumps({"error": f"Could not extract stream URL for video {video_id}. All methods failed."}))
 
 def handle_album_songs(album_id: str):
     ytm = load_ytmusic()
