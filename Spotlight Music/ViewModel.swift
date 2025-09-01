@@ -96,6 +96,118 @@ final class AppViewModel: ObservableObject {
         print("🔥 MANUAL AUTO-PLAY TEST TRIGGERED")
         handleSongEnded()
     }
+    
+    // Force auto-play test regardless of settings
+    func forceTestAutoPlay() {
+        print("🚨 FORCE AUTO-PLAY TEST - BYPASSING SETTINGS")
+        
+        guard let currentSong = nowPlaying else {
+            print("❌ No current song to test auto-play")
+            return
+        }
+        
+        print("🎵 Force testing with current song: \(currentSong.title)")
+        
+        // Force find next song
+        if let nextSong = findNextSongSimple(for: currentSong) {
+            print("✅ Force test found next song: \(nextSong.title)")
+            // Just play the next song directly
+            play(song: nextSong)
+        } else {
+            print("❌ Force test could not find next song")
+        }
+    }
+    
+    // Enhanced auto-play test with extraction method validation
+    func testAutoPlayWithExtraction() {
+        print("🔥 === ENHANCED AUTO-PLAY TEST WITH EXTRACTION ===")
+        
+        guard let currentSong = nowPlaying else {
+            print("❌ No current song to test auto-play")
+            return
+        }
+        
+        print("🎵 Testing with current song: \(currentSong.title)")
+        print("🔍 Available contexts:")
+        print("  - Album songs: \(albumSongs.count)")
+        print("  - Artist songs: \(artistSongs.count)")
+        print("  - Search results: \(songs.count)")
+        print("  - Videos: \(videos.count)")
+        print("  - Favorites: \(favoriteSongs.count)")
+        print("🞯 Current playlist: \(currentPlaylist.count) songs, index \(currentPlaylistIndex)")
+        
+        // Test next song finding
+        if let nextSong = findNextSongSimple(for: currentSong) {
+            print("✅ Next song found: \(nextSong.title)")
+            
+            // Test extraction for the next song
+            Task {
+                print("🔄 Testing extraction for next song...")
+                do {
+                    let json = try await runHelper(arguments: ["stream_url", nextSong.id])
+                    if let urlString = json["stream_url"] as? String {
+                        print("✅ Extraction test successful for next song: \(urlString.prefix(50))...")
+                        
+                        // Now trigger the actual auto-play
+                        await MainActor.run {
+                            self.handleSongEnded()
+                        }
+                    } else if let error = json["error"] as? String {
+                        print("⚠️ Extraction test failed: \(error)")
+                        print("🔄 Trying web-based extraction...")
+                        
+                        if let webURL = await self.extractStreamURLFromWeb(videoId: nextSong.id) {
+                            print("✅ Web extraction test successful: \(webURL.prefix(50))...")
+                            await MainActor.run {
+                                self.handleSongEnded()
+                            }
+                        } else {
+                            print("❌ Both extraction methods failed for next song")
+                        }
+                    }
+                } catch {
+                    print("❌ Extraction test error: \(error)")
+                }
+            }
+        } else {
+            print("❌ No next song found for auto-play test")
+        }
+        
+        print("🔥 === END ENHANCED AUTO-PLAY TEST ===")
+    }
+    
+    // New method to test next/previous functionality
+    func debugPlaylistContext() {
+        guard let nowPlayingSong = nowPlaying else {
+            print("❌ No song currently playing")
+            return
+        }
+        
+        print("🎵 Current Song: \(nowPlayingSong.title)")
+        print("🎯 Playlist Context:")
+        print("  - isPlayingFromPlaylist: \(isPlayingFromPlaylist)")
+        print("  - currentPlaylist count: \(currentPlaylist.count)")
+        print("  - currentPlaylistIndex: \(currentPlaylistIndex)")
+        
+        print("📋 Available Lists:")
+        print("  - songs: \(songs.count)")
+        print("  - albumSongs: \(albumSongs.count)")
+        print("  - artistSongs: \(artistSongs.count)")
+        print("  - videos: \(videos.count)")
+        print("  - favoriteSongs: \(favoriteSongs.count)")
+        
+        if let nextSong = findNextSongSimple(for: nowPlayingSong) {
+            print("✅ Next song available: \(nextSong.title)")
+        } else {
+            print("❌ No next song found")
+        }
+        
+        if let previousSong = findPreviousSong(for: nowPlayingSong) {
+            print("✅ Previous song available: \(previousSong.title)")
+        } else {
+            print("❌ No previous song found")
+        }
+    }
 
     // MARK: - Python environment bootstrap without venv
     private func sitePackagesPath() -> String {
@@ -362,6 +474,56 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Context Management
+    
+    /// Updates the playlist context when the currently playing song might have moved to a different category
+    private func updatePlaylistContextIfNeeded() {
+        guard let nowPlayingSong = nowPlaying else { return }
+        
+        print("🔄 Checking if playlist context needs updating for: \(nowPlayingSong.title)")
+        
+        // If we're currently playing from a saved playlist, check if it's still valid
+        if isPlayingFromPlaylist && !currentPlaylist.isEmpty {
+            // Check if current song is still in the saved playlist at the expected index
+            if currentPlaylistIndex >= 0 && currentPlaylistIndex < currentPlaylist.count {
+                let expectedSong = currentPlaylist[currentPlaylistIndex]
+                if expectedSong.id == nowPlayingSong.id {
+                    print("✅ Saved playlist context is still valid")
+                    return
+                }
+            }
+        }
+        
+        // Saved context is invalid, try to find the song in current data
+        if let albumIndex = albumSongs.firstIndex(where: { $0.id == nowPlayingSong.id }) {
+            currentPlaylist = albumSongs
+            currentPlaylistIndex = albumIndex
+            isPlayingFromPlaylist = true
+            print("🎧 Updated to album context: index \(albumIndex) of \(albumSongs.count)")
+        } else if let artistIndex = artistSongs.firstIndex(where: { $0.id == nowPlayingSong.id }) {
+            currentPlaylist = artistSongs
+            currentPlaylistIndex = artistIndex
+            isPlayingFromPlaylist = true
+            print("🎤 Updated to artist context: index \(artistIndex) of \(artistSongs.count)")
+        } else if let searchIndex = songs.firstIndex(where: { $0.id == nowPlayingSong.id }) {
+            currentPlaylist = songs
+            currentPlaylistIndex = searchIndex
+            isPlayingFromPlaylist = true
+            print("🔍 Updated to search context: index \(searchIndex) of \(songs.count)")
+        } else if let favoriteIndex = favoriteSongs.firstIndex(where: { $0.id == nowPlayingSong.id }) {
+            currentPlaylist = favoriteSongs
+            currentPlaylistIndex = favoriteIndex
+            isPlayingFromPlaylist = true
+            print("❤️ Updated to favorites context: index \(favoriteIndex) of \(favoriteSongs.count)")
+        } else {
+            // Song not found in any current list
+            isPlayingFromPlaylist = false
+            currentPlaylist = []
+            currentPlaylistIndex = -1
+            print("❌ No valid context found, cleared playlist context")
+        }
+    }
+
     func performSearch(_ q: String) async {
         let trimmed = q.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -410,6 +572,9 @@ final class AppViewModel: ObservableObject {
                 self.albums = decoded.albums
                 self.artists = decoded.artists
                 self.videos = decoded.videos
+                
+                // Update playlist context if current song might be in new results
+                self.updatePlaylistContextIfNeeded()
                 
                 // Cache the result to save energy on future searches
                 cacheSearchResult(query: trimmed, result: decoded)
@@ -625,40 +790,18 @@ final class AppViewModel: ObservableObject {
         print("🎵 Playing: \(song.title)")
         nowPlaying = song
         
-        // Update playlist context
+        // Simple context management
         if let playlist = playlist {
             currentPlaylist = playlist
             currentPlaylistIndex = index
             isPlayingFromPlaylist = true
-            print("🎯 Set explicit playlist context: \(playlist.count) songs, playing index \(index)")
+            print("🎯 Set playlist context: \(playlist.count) songs, index \(index)")
         } else {
-            // Check if this song is in the current album songs
-            if let albumIndex = albumSongs.firstIndex(where: { $0.id == song.id }) {
-                currentPlaylist = albumSongs
-                currentPlaylistIndex = albumIndex
-                isPlayingFromPlaylist = true
-                print("🎧 Detected album context: \(albumSongs.count) songs, playing index \(albumIndex)")
-            } else if let artistIndex = artistSongs.firstIndex(where: { $0.id == song.id }) {
-                currentPlaylist = artistSongs
-                currentPlaylistIndex = artistIndex
-                isPlayingFromPlaylist = true
-                print("🎤 Detected artist context: \(artistSongs.count) songs, playing index \(artistIndex)")
-            } else if let favoriteIndex = favoriteSongs.firstIndex(where: { $0.id == song.id }) {
-                currentPlaylist = favoriteSongs
-                currentPlaylistIndex = favoriteIndex
-                isPlayingFromPlaylist = true
-                print("❤️ Detected favorites context: \(favoriteSongs.count) songs, playing index \(favoriteIndex)")
-            } else if let searchIndex = songs.firstIndex(where: { $0.id == song.id }) {
-                currentPlaylist = songs
-                currentPlaylistIndex = searchIndex
-                isPlayingFromPlaylist = true
-                print("🔍 Detected search results context: \(songs.count) songs, playing index \(searchIndex)")
-            } else {
-                isPlayingFromPlaylist = false
-                currentPlaylist = []
-                currentPlaylistIndex = -1
-                print("No playlist context found for song: \(song.title)")
-            }
+            // Try to auto-detect context if not provided
+            isPlayingFromPlaylist = false
+            currentPlaylist = []
+            currentPlaylistIndex = -1
+            print("🚐 No playlist context - playing single song")
         }
         
         // Clean up previous observers immediately
@@ -678,51 +821,50 @@ final class AppViewModel: ObservableObject {
             var streamURL: URL?
             var errorMsg: String?
             var retryCount = 0
-            let maxRetries = 1 // Only retry once with yt-dlp update
+            let maxRetries = 1 // Keep it simple
             
+            // Simple extraction with one retry
             while streamURL == nil && retryCount <= maxRetries {
-                // First try: Python helper with yt-dlp
+                print("🔄 Stream extraction attempt \(retryCount + 1) for: \(song.title)")
+                
+                // Method 1: Python helper
                 do {
                     let json = try await runHelper(arguments: ["stream_url", song.id])
                     if let error = json["error"] as? String {
-                        print("⚠️ Python extraction failed (attempt \(retryCount + 1)): \(error)")
+                        print("⚠️ Python extraction failed: \(error)")
                         errorMsg = error
                     } else if let urlString = json["stream_url"] as? String, let url = URL(string: urlString) {
                         streamURL = url
-                        print("✅ Python extraction succeeded on attempt \(retryCount + 1)")
+                        print("✅ Python extraction succeeded")
                         break
                     }
                 } catch {
-                    print("⚠️ Python helper failed (attempt \(retryCount + 1)): \(error)")
+                    print("⚠️ Python helper failed: \(error)")
                     errorMsg = error.localizedDescription
                 }
                 
-                // Second try: Swift web-based fallback
+                // Method 2: Web fallback if Python failed
                 if streamURL == nil {
-                    print("🌐 Trying web-based extraction fallback...")
+                    print("🌐 Trying web extraction...")
                     if let webURL = await self.extractStreamURLFromWeb(videoId: song.id) {
                         streamURL = URL(string: webURL)
                         print("✅ Web extraction succeeded")
                         break
-                    } else {
-                        print("❌ Web extraction also failed")
                     }
                 }
                 
-                // If both methods failed on first attempt, try updating yt-dlp and retry
-                if streamURL == nil && retryCount == 0 {
-                    print("🔄 All extraction methods failed, forcing yt-dlp update and retrying...")
-                    await self.forceUpdateYtDlp()
-                    retryCount += 1
-                } else {
-                    break
+                retryCount += 1
+                if streamURL == nil && retryCount <= maxRetries {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
                 }
             }
             
-            // Handle final result
+            // Handle final result - simple error handling
             guard let url = streamURL else {
                 await MainActor.run { 
-                    self.errorMessage = errorMsg ?? "Could not extract stream URL using any method after \(retryCount + 1) attempts"
+                    let errorMsg = errorMsg ?? "Could not extract stream URL after \(retryCount + 1) attempts"
+                    self.errorMessage = errorMsg
+                    print("❌ Stream extraction failed for '\(song.title)': \(errorMsg)")
                     MPNowPlayingInfoCenter.default().playbackState = .stopped
                 }
                 return
@@ -734,17 +876,35 @@ final class AppViewModel: ObservableObject {
             self.player = player
             player.play()
             self.didTriggerEndForCurrentItem = false
+            
+            print("🎵 Setting up player observer for new song: \(song.title)")
+
+            // CRITICAL FIX: Remove old observer before setting up new one
+            if let oldToken = self.endObserverToken {
+                print("🧹 Removing old AVPlayerItemDidPlayToEndTime observer")
+                NotificationCenter.default.removeObserver(oldToken)
+                self.endObserverToken = nil
+            }
 
             await self.configureNowPlaying(for: song, streamURL: url)
             self.observePlaybackProgress()
             self.configureRemoteCommandCenter()
             self.endObserverToken = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-                guard let self else { return }
+                print("🔥🔥🔥 AVPlayerItemDidPlayToEndTime TRIGGERED! 🔥🔥🔥")
+                guard let self else { 
+                    print("⚠️ Self is nil in AVPlayerItemDidPlayToEndTime observer")
+                    return 
+                }
+                print("🔥 Song ended via AVPlayer notification - flag: \(self.didTriggerEndForCurrentItem)")
                 Task { @MainActor in
                     if !self.didTriggerEndForCurrentItem {
                         self.didTriggerEndForCurrentItem = true
-                        print("🔥 Song ended via AVPlayer notification - triggering auto-play")
+                        print("🔥 Triggering handleSongEnded()")
+                        // Add a small delay to ensure the player state is properly updated
+                        try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
                         self.handleSongEnded()
+                    } else {
+                        print("⚠️ didTriggerEndForCurrentItem is already true - skipping")
                     }
                 }
             }
@@ -759,290 +919,331 @@ final class AppViewModel: ObservableObject {
     }
     
     private func handleSongEnded() {
+        print("🎭 === SIMPLE SONG ENDED HANDLER ===")
+        print("🎵 Current song: \(nowPlaying?.title ?? "None")")
+        
         MPNowPlayingInfoCenter.default().playbackState = .stopped
         
-        print("🔥 URGENT: Song ended, attempting auto-play...")
-        print("Current song: \(nowPlaying?.title ?? "none")")
-        print("Auto-play setting: \(SettingsManager.shared.autoPlayNext)")
-        print("Playlist context: isPlayingFromPlaylist=\(isPlayingFromPlaylist), index=\(currentPlaylistIndex), playlist size=\(currentPlaylist.count)")
+        // Get current song
+        guard let currentSong = nowPlaying else {
+            print("❌ No current song to auto-play from")
+            return
+        }
         
-        // ALWAYS try to auto-play next - ignore playlist context issues
+        print("⚙️ Auto-play setting: \(SettingsManager.shared.autoPlayNext)")
+        
+        // Check if auto-play is enabled
         guard SettingsManager.shared.autoPlayNext else { 
             print("❌ Auto-play is disabled in settings")
             return 
         }
         
-        // STEP 1: PRIORITIZE CURRENT PLAYLIST CONTEXT - This is the most reliable
-        print("🔍 Checking saved playlist context:")
-        print("   - isPlayingFromPlaylist: \(isPlayingFromPlaylist)")
-        print("   - currentPlaylist.count: \(currentPlaylist.count)")
-        print("   - currentPlaylistIndex: \(currentPlaylistIndex)")
-        print("   - Next index would be: \(currentPlaylistIndex + 1)")
-        
-        if isPlayingFromPlaylist && !currentPlaylist.isEmpty && currentPlaylistIndex >= 0 && currentPlaylistIndex < currentPlaylist.count - 1 {
-            let nextIndex = currentPlaylistIndex + 1
-            let nextSong = currentPlaylist[nextIndex]
-            print("✅ Using saved playlist context: \(nextSong.title) at index \(nextIndex)")
-            play(song: nextSong, fromPlaylist: currentPlaylist, atIndex: nextIndex)
-            return
+        // Simple next song finding - try each context in order
+        if let nextSong = findNextSongSimple(for: currentSong) {
+            print("✅ Playing next song: \(nextSong.title)")
+            // Use a simple play call without complex context management
+            Task {
+                await MainActor.run {
+                    self.play(song: nextSong)
+                }
+            }
         } else {
-            print("❌ Saved playlist context failed:")
-            if !isPlayingFromPlaylist {
-                print("   - Not playing from playlist")
-            }
-            if currentPlaylist.isEmpty {
-                print("   - Current playlist is empty")
-            }
-            if currentPlaylistIndex < 0 {
-                print("   - Invalid current index (< 0)")
-            }
-            if currentPlaylistIndex >= currentPlaylist.count - 1 {
-                print("   - At end of playlist (index \(currentPlaylistIndex) >= \(currentPlaylist.count - 1))")
-            }
+            print("❌ No next song found")
         }
         
-        // STEP 2: If playlist context is broken, try to rebuild it aggressively
-        print("⚠️ Playlist context failed or incomplete, using aggressive fallback...")
-        
-        // CRITICAL FIX: Always try to find next song regardless of playlist context
-        forceAutoPlayNext()
+        print("🎭 === END SIMPLE SONG ENDED ===")
     }
     
-    // Aggressive auto-play that ALWAYS tries to find a next song
-    private func forceAutoPlayNext() {
-        guard let currentSong = nowPlaying else {
-            print("❌ No current song")
-            return
-        }
+    // Simplified next song finder - less complex, more reliable
+    private func findNextSongSimple(for currentSong: SongItem) -> SongItem? {
+        print("🔍 === SIMPLE NEXT SONG FINDER ===")
+        print("🎵 Looking for next after: \(currentSong.title)")
         
-        print("🚀 FORCE AUTO-PLAY for: \(currentSong.title)")
-        
-        // CRITICAL FIX: If we have a valid currentPlaylist, use it first regardless of other arrays
-        if isPlayingFromPlaylist && !currentPlaylist.isEmpty && currentPlaylistIndex >= 0 {
-            if currentPlaylistIndex < currentPlaylist.count - 1 {
-                let nextIndex = currentPlaylistIndex + 1
-                let nextSong = currentPlaylist[nextIndex]
-                print("✅ SAVED PLAYLIST: Playing \(nextSong.title) at index \(nextIndex)")
-                play(song: nextSong, fromPlaylist: currentPlaylist, atIndex: nextIndex)
-                return
-            } else {
-                print("📝 At end of saved playlist (\(currentPlaylist.count) songs)")
-            }
-        }
-        
-        // 1. Try album songs FIRST (highest priority for auto-play continuity)
+        // Priority 1: Album songs (most common use case)
         if !albumSongs.isEmpty {
-            if let currentIndex = albumSongs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < albumSongs.count - 1 {
-                    let nextSong = albumSongs[currentIndex + 1]
-                    print("✅ ALBUM: Playing \(nextSong.title) at index \(currentIndex + 1)")
-                    play(song: nextSong, fromPlaylist: albumSongs, atIndex: currentIndex + 1)
-                    return
-                } else {
-                    print("📝 At end of album songs (\(albumSongs.count) songs)")
-                }
-            } else {
-                print("📝 Current song not found in album songs")
+            if let currentIndex = albumSongs.firstIndex(where: { $0.id == currentSong.id }),
+               currentIndex < albumSongs.count - 1 {
+                let nextSong = albumSongs[currentIndex + 1]
+                print("✅ Found next in album: \(nextSong.title)")
+                return nextSong
             }
         }
         
-        // SEARCH RESULTS: Try search results as fallback
-        if !songs.isEmpty {
-            if let currentIndex = songs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < songs.count - 1 {
-                    let nextSong = songs[currentIndex + 1]
-                    print("✅ SEARCH: Playing \(nextSong.title) at index \(currentIndex + 1)")
-                    play(song: nextSong, fromPlaylist: songs, atIndex: currentIndex + 1)
-                    return
-                } else {
-                    print("📝 At end of search results (\(songs.count) songs)")
-                }
-            } else {
-                print("📝 Current song not found in search results")
-            }
-        }
-        
-        // 2. Try artist songs
+        // Priority 2: Artist songs
         if !artistSongs.isEmpty {
-            if let currentIndex = artistSongs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < artistSongs.count - 1 {
-                    let nextSong = artistSongs[currentIndex + 1]
-                    print("✅ ARTIST: Playing \(nextSong.title)")
-                    play(song: nextSong, fromPlaylist: artistSongs, atIndex: currentIndex + 1)
-                    return
-                }
+            if let currentIndex = artistSongs.firstIndex(where: { $0.id == currentSong.id }),
+               currentIndex < artistSongs.count - 1 {
+                let nextSong = artistSongs[currentIndex + 1]
+                print("✅ Found next in artist songs: \(nextSong.title)")
+                return nextSong
             }
         }
         
-        // 3. Try videos (convert to songs)
-        if !videos.isEmpty {
-            if let currentIndex = videos.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < videos.count - 1 {
-                    let nextVideo = videos[currentIndex + 1]
-                    print("✅ VIDEO: Playing \(nextVideo.title)")
-                    play(video: nextVideo, fromPlaylist: videos, atIndex: currentIndex + 1)
-                    return
-                }
+        // Priority 3: Search results
+        if !songs.isEmpty {
+            if let currentIndex = songs.firstIndex(where: { $0.id == currentSong.id }),
+               currentIndex < songs.count - 1 {
+                let nextSong = songs[currentIndex + 1]
+                print("✅ Found next in search results: \(nextSong.title)")
+                return nextSong
             }
         }
         
-        // 4. Try favorites as last resort
+        // Priority 4: Favorites
         if !favoriteSongs.isEmpty {
-            if let currentIndex = favoriteSongs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < favoriteSongs.count - 1 {
-                    let nextSong = favoriteSongs[currentIndex + 1]
-                    print("✅ FAVORITES: Playing \(nextSong.title)")
-                    play(song: nextSong, fromPlaylist: favoriteSongs, atIndex: currentIndex + 1)
-                    return
-                }
+            if let currentIndex = favoriteSongs.firstIndex(where: { $0.id == currentSong.id }),
+               currentIndex < favoriteSongs.count - 1 {
+                let nextSong = favoriteSongs[currentIndex + 1]
+                print("✅ Found next in favorites: \(nextSong.title)")
+                return nextSong
             }
         }
         
-        // DESPERATE FALLBACK: If nothing worked, try to find ANY next song from ANY available list
-        print("🆘 DESPERATE FALLBACK: Trying to find ANY next song...")
-        
-        // Try the first available song from any list (except the current song)
-        var allAvailableSongs: [SongItem] = []
-        allAvailableSongs.append(contentsOf: songs)
-        allAvailableSongs.append(contentsOf: albumSongs)
-        allAvailableSongs.append(contentsOf: artistSongs)
-        allAvailableSongs.append(contentsOf: favoriteSongs)
-        
-        if let nextSong = allAvailableSongs.first(where: { $0.id != currentSong.id }) {
-            print("✅ FALLBACK: Playing \(nextSong.title)")
-            play(song: nextSong)
-            return
+        // Priority 5: Videos
+        if !videos.isEmpty {
+            if let currentIndex = videos.firstIndex(where: { $0.id == currentSong.id }),
+               currentIndex < videos.count - 1 {
+                let nextVideo = videos[currentIndex + 1]
+                let nextSong = SongItem(
+                    id: nextVideo.id,
+                    title: nextVideo.title,
+                    artists: nextVideo.artists,
+                    album: nil,
+                    duration: nextVideo.duration,
+                    thumbnail: nextVideo.thumbnail
+                )
+                print("✅ Found next in videos: \(nextSong.title)")
+                return nextSong
+            }
         }
         
-        print("❌ NO NEXT SONG FOUND - Completely exhausted all options")
+        print("❌ No next song found in any context")
+        return nil
     }
     
-    // Backup monitoring for song end detection
+    private func playNextFoundSong(_ nextSong: SongItem, after currentSong: SongItem) {
+        print("🎵 === PLAYING NEXT SONG ====")
+        print("🎵 From: \(currentSong.title)")
+        print("🎵 To: \(nextSong.title)")
+        print("🎯 Current context: isPlayingFromPlaylist=\(isPlayingFromPlaylist), currentPlaylistIndex=\(currentPlaylistIndex)")
+        
+        // Set correct playlist context based on where we found the next song
+        if isPlayingFromPlaylist && !currentPlaylist.isEmpty {
+            // Use existing playlist context and increment index
+            let nextIndex = currentPlaylistIndex + 1
+            print("✅ Using existing playlist context: \(currentPlaylist.count) songs, moving to index \(nextIndex)")
+            play(song: nextSong, fromPlaylist: currentPlaylist, atIndex: nextIndex)
+        } else if albumSongs.contains(where: { $0.id == nextSong.id }),
+                  let nextIndex = albumSongs.firstIndex(where: { $0.id == nextSong.id }) {
+            // Playing from album
+            print("🎧 Setting album context: \(albumSongs.count) songs, index \(nextIndex)")
+            play(song: nextSong, fromPlaylist: albumSongs, atIndex: nextIndex)
+        } else if artistSongs.contains(where: { $0.id == nextSong.id }),
+                  let nextIndex = artistSongs.firstIndex(where: { $0.id == nextSong.id }) {
+            // Playing from artist
+            print("🎤 Setting artist context: \(artistSongs.count) songs, index \(nextIndex)")
+            play(song: nextSong, fromPlaylist: artistSongs, atIndex: nextIndex)
+        } else if songs.contains(where: { $0.id == nextSong.id }),
+                  let nextIndex = songs.firstIndex(where: { $0.id == nextSong.id }) {
+            // Playing from search results
+            print("🔍 Setting search results context: \(songs.count) songs, index \(nextIndex)")
+            play(song: nextSong, fromPlaylist: songs, atIndex: nextIndex)
+        } else if favoriteSongs.contains(where: { $0.id == nextSong.id }),
+                  let nextIndex = favoriteSongs.firstIndex(where: { $0.id == nextSong.id }) {
+            // Playing from favorites
+            print("❤️ Setting favorites context: \(favoriteSongs.count) songs, index \(nextIndex)")
+            play(song: nextSong, fromPlaylist: favoriteSongs, atIndex: nextIndex)
+        } else if videos.contains(where: { $0.id == nextSong.id }),
+                  let nextIndex = videos.firstIndex(where: { $0.id == nextSong.id }) {
+            // Playing from videos
+            let videoPlaylist = videos.map { SongItem(id: $0.id, title: $0.title, artists: $0.artists, album: nil, duration: $0.duration, thumbnail: $0.thumbnail) }
+            print("📺 Setting videos context: \(videoPlaylist.count) songs, index \(nextIndex)")
+            play(song: nextSong, fromPlaylist: videoPlaylist, atIndex: nextIndex)
+        } else {
+            // Fallback: play without specific playlist context but preserve some context
+            print("⚠️ No specific context found, playing with minimal context")
+            // Try to maintain some basic playlist context for continued auto-play
+            if !currentPlaylist.isEmpty {
+                // Create a simple continuation context
+                let continuationPlaylist = [nextSong]
+                play(song: nextSong, fromPlaylist: continuationPlaylist, atIndex: 0)
+            } else {
+                play(song: nextSong)
+            }
+        }
+        
+        print("🎵 === END PLAYING NEXT SONG ====")
+    }
+    
+    // MARK: - Manual Controls (Next/Previous)
+    
+    // Simplified backup monitoring for song end detection
     private func monitorPlaybackEnd(for item: AVPlayerItem) {
         Task {
-            // Wait a bit then start monitoring
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+            // Wait for player to be ready
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
             
-            while item.status == .readyToPlay && player?.currentItem == item {
+            while item.status == .readyToPlay && player?.currentItem == item && !didTriggerEndForCurrentItem {
                 let currentTime = item.currentTime().seconds
                 let duration = item.duration.seconds
                 
-                // If we're near the end and haven't triggered auto-play yet
-                if duration > 0 && currentTime > 0 && (duration - currentTime) < 0.5 && !didTriggerEndForCurrentItem {
+                // Simple end detection - trigger at 1 second remaining
+                if duration > 0 && currentTime > 0 && (duration - currentTime) < 1.0 {
                     await MainActor.run {
-                        self.didTriggerEndForCurrentItem = true
-                        print("🔥 Song end detected via time monitoring - triggering auto-play")
-                        self.handleSongEnded()
+                        if !self.didTriggerEndForCurrentItem {
+                            self.didTriggerEndForCurrentItem = true
+                            print("🔥 Song ending detected - triggering auto-play")
+                            Task {
+                                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 second delay
+                                await MainActor.run {
+                                    self.handleSongEnded()
+                                }
+                            }
+                        }
                     }
                     break
                 }
                 
-                try? await Task.sleep(nanoseconds: 500_000_000) // Check every 0.5 seconds
+                // Check every second
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
     }
     
-    // Try to find a logical next song when not in an explicit playlist
-    private func tryAutoPlayFromAvailableSongs() {
-        guard let currentSong = nowPlaying else { 
-            print("❌ No current song for auto-play")
-            return 
-        }
-        
-        print("🔍 Trying to find next song for: \(currentSong.title)")
-        print("🔍 Context check - Album: \(albumSongs.count), Artist: \(artistSongs.count), Search: \(songs.count), Favorites: \(favoriteSongs.count)")
-        
-        // Check if we can continue with album songs (highest priority)
-        if !albumSongs.isEmpty {
-            if let currentIndex = albumSongs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < albumSongs.count - 1 {
-                    let nextSong = albumSongs[currentIndex + 1]
-                    print("🎧 Auto-playing next from album: \(nextSong.title) (index \(currentIndex + 1)/\(albumSongs.count))")
-                    play(song: nextSong, fromPlaylist: albumSongs, atIndex: currentIndex + 1)
-                    return
-                } else {
-                    print("🎧 At end of album songs")
-                }
-            } else {
-                print("🎧 Current song not found in album songs")
-            }
-        }
-        
-        // Check if we can continue with artist songs
-        if !artistSongs.isEmpty {
-            if let currentIndex = artistSongs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < artistSongs.count - 1 {
-                    let nextSong = artistSongs[currentIndex + 1]
-                    print("🎤 Auto-playing next from artist songs: \(nextSong.title) (index \(currentIndex + 1)/\(artistSongs.count))")
-                    play(song: nextSong, fromPlaylist: artistSongs, atIndex: currentIndex + 1)
-                    return
-                } else {
-                    print("🎤 At end of artist songs")
-                }
-            } else {
-                print("🎤 Current song not found in artist songs")
-            }
-        }
-        
-        // Check if we can continue with search results
-        if !songs.isEmpty {
-            if let currentIndex = songs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < songs.count - 1 {
-                    let nextSong = songs[currentIndex + 1]
-                    print("🔍 Auto-playing next from search results: \(nextSong.title) (index \(currentIndex + 1)/\(songs.count))")
-                    play(song: nextSong, fromPlaylist: songs, atIndex: currentIndex + 1)
-                    return
-                } else {
-                    print("🔍 At end of search results")
-                }
-            } else {
-                print("🔍 Current song not found in search results")
-            }
-        }
-        
-        // Check if we can continue with favorites
-        if !favoriteSongs.isEmpty {
-            if let currentIndex = favoriteSongs.firstIndex(where: { $0.id == currentSong.id }) {
-                if currentIndex < favoriteSongs.count - 1 {
-                    let nextSong = favoriteSongs[currentIndex + 1]
-                    print("❤️ Auto-playing next from favorites: \(nextSong.title) (index \(currentIndex + 1)/\(favoriteSongs.count))")
-                    play(song: nextSong, fromPlaylist: favoriteSongs, atIndex: currentIndex + 1)
-                    return
-                } else {
-                    print("❤️ At end of favorites")
-                }
-            } else {
-                print("❤️ Current song not found in favorites")
-            }
-        }
-        
-        print("❌ No logical next song found for auto-play")
-    }
+    // MARK: - Manual Controls (Next/Previous)
     
     private func playNextTrack() {
-        guard isPlayingFromPlaylist && currentPlaylistIndex >= 0 && currentPlaylistIndex < currentPlaylist.count - 1 else {
-            // If not in a playlist context, try to find a logical next song
-            if !isPlayingFromPlaylist {
-                tryAutoPlayFromAvailableSongs()
-            }
+        print("🎵 Manual next track requested")
+        
+        guard let currentSong = nowPlaying else {
+            print("❌ No current song for manual next")
             return
         }
-        let nextIndex = currentPlaylistIndex + 1
-        let nextSong = currentPlaylist[nextIndex]
-        play(song: nextSong, fromPlaylist: currentPlaylist, atIndex: nextIndex)
+        
+        if let nextSong = findNextSongSimple(for: currentSong) {
+            print("✅ Playing next song: \(nextSong.title)")
+            playNextFoundSong(nextSong, after: currentSong)
+        } else {
+            print("❌ No next song available for manual next")
+        }
     }
     
     private func playPreviousTrack() {
-        guard isPlayingFromPlaylist && currentPlaylistIndex > 0 else {
-            // If not in a playlist context, try to find a logical previous song
-            if !isPlayingFromPlaylist {
-                tryAutoPlayPreviousFromAvailableSongs()
-            }
+        print("🎵 Manual previous track requested")
+        
+        guard let currentSong = nowPlaying else {
+            print("❌ No current song for manual previous")
             return
         }
-        let previousIndex = currentPlaylistIndex - 1
-        let previousSong = currentPlaylist[previousIndex]
-        play(song: previousSong, fromPlaylist: currentPlaylist, atIndex: previousIndex)
+        
+        if let previousSong = findPreviousSong(for: currentSong) {
+            print("✅ Playing previous song: \(previousSong.title)")
+            playPreviousFoundSong(previousSong, before: currentSong)
+        } else {
+            print("❌ No previous song available")
+        }
+    }
+    
+    private func findPreviousSong(for currentSong: SongItem) -> SongItem? {
+        print("🔍 Searching for previous song before: \(currentSong.title)")
+        
+        // Method 1: Check if we have explicit playlist context
+        if isPlayingFromPlaylist && !currentPlaylist.isEmpty && 
+           currentPlaylistIndex > 0 {
+            let previousSong = currentPlaylist[currentPlaylistIndex - 1]
+            print("✅ Found previous in saved playlist: \(previousSong.title) at index \(currentPlaylistIndex - 1)")
+            return previousSong
+        }
+        
+        // Method 2: Album songs - highest priority
+        if !albumSongs.isEmpty,
+           let currentIndex = albumSongs.firstIndex(where: { $0.id == currentSong.id }),
+           currentIndex > 0 {
+            let previousSong = albumSongs[currentIndex - 1]
+            print("✅ Found previous in album: \(previousSong.title)")
+            return previousSong
+        }
+        
+        // Method 3: Artist songs
+        if !artistSongs.isEmpty,
+           let currentIndex = artistSongs.firstIndex(where: { $0.id == currentSong.id }),
+           currentIndex > 0 {
+            let previousSong = artistSongs[currentIndex - 1]
+            print("✅ Found previous in artist songs: \(previousSong.title)")
+            return previousSong
+        }
+        
+        // Method 4: Search results
+        if !songs.isEmpty,
+           let currentIndex = songs.firstIndex(where: { $0.id == currentSong.id }),
+           currentIndex > 0 {
+            let previousSong = songs[currentIndex - 1]
+            print("✅ Found previous in search results: \(previousSong.title)")
+            return previousSong
+        }
+        
+        // Method 5: Videos
+        if !videos.isEmpty,
+           let currentIndex = videos.firstIndex(where: { $0.id == currentSong.id }),
+           currentIndex > 0 {
+            let previousVideo = videos[currentIndex - 1]
+            let previousSong = SongItem(
+                id: previousVideo.id,
+                title: previousVideo.title,
+                artists: previousVideo.artists,
+                album: nil,
+                duration: previousVideo.duration,
+                thumbnail: previousVideo.thumbnail
+            )
+            print("✅ Found previous in videos: \(previousSong.title)")
+            return previousSong
+        }
+        
+        // Method 6: Favorites
+        if !favoriteSongs.isEmpty,
+           let currentIndex = favoriteSongs.firstIndex(where: { $0.id == currentSong.id }),
+           currentIndex > 0 {
+            let previousSong = favoriteSongs[currentIndex - 1]
+            print("✅ Found previous in favorites: \(previousSong.title)")
+            return previousSong
+        }
+        
+        print("❌ No previous song found in any category")
+        return nil
+    }
+    
+    private func playPreviousFoundSong(_ previousSong: SongItem, before currentSong: SongItem) {
+        print("🎵 Playing previous song: \(previousSong.title)")
+        
+        // Set correct playlist context based on where we found the previous song
+        if isPlayingFromPlaylist && !currentPlaylist.isEmpty {
+            // Use existing playlist context
+            play(song: previousSong, fromPlaylist: currentPlaylist, atIndex: currentPlaylistIndex - 1)
+        } else if albumSongs.contains(where: { $0.id == previousSong.id }),
+                  let previousIndex = albumSongs.firstIndex(where: { $0.id == previousSong.id }) {
+            // Playing from album
+            play(song: previousSong, fromPlaylist: albumSongs, atIndex: previousIndex)
+        } else if artistSongs.contains(where: { $0.id == previousSong.id }),
+                  let previousIndex = artistSongs.firstIndex(where: { $0.id == previousSong.id }) {
+            // Playing from artist
+            play(song: previousSong, fromPlaylist: artistSongs, atIndex: previousIndex)
+        } else if songs.contains(where: { $0.id == previousSong.id }),
+                  let previousIndex = songs.firstIndex(where: { $0.id == previousSong.id }) {
+            // Playing from search results
+            play(song: previousSong, fromPlaylist: songs, atIndex: previousIndex)
+        } else if favoriteSongs.contains(where: { $0.id == previousSong.id }),
+                  let previousIndex = favoriteSongs.firstIndex(where: { $0.id == previousSong.id }) {
+            // Playing from favorites
+            play(song: previousSong, fromPlaylist: favoriteSongs, atIndex: previousIndex)
+        } else if videos.contains(where: { $0.id == previousSong.id }),
+                  let previousIndex = videos.firstIndex(where: { $0.id == previousSong.id }) {
+            // Playing from videos
+            let videoPlaylist = videos.map { SongItem(id: $0.id, title: $0.title, artists: $0.artists, album: nil, duration: $0.duration, thumbnail: $0.thumbnail) }
+            play(song: previousSong, fromPlaylist: videoPlaylist, atIndex: previousIndex)
+        } else {
+            // Fallback: play without specific playlist context
+            play(song: previousSong)
+        }
     }
     
     // Try to find a logical previous song when not in an explicit playlist
@@ -1127,17 +1328,24 @@ final class AppViewModel: ObservableObject {
                     MPNowPlayingInfoCenter.default().playbackState = rate > 0 ? .playing : .paused
                 }
 
-                // Always check for end-of-song with auto-play enabled
+                // Check for end-of-song with auto-play enabled (improved reliability)  
                 if SettingsManager.shared.autoPlayNext,
-                   self.isPlayingFromPlaylist,
                    let durationTime = self.player?.currentItem?.duration,
-                   durationTime.isNumeric,
+                   durationTime.isNumeric && !durationTime.isIndefinite,
                    CMTimeGetSeconds(durationTime).isFinite {
                     let total = CMTimeGetSeconds(durationTime)
-                    if total > 0, total - currentSeconds <= 2.0, !self.didTriggerEndForCurrentItem {
-                        print("Song ending via fallback mechanism - total: \(total), current: \(currentSeconds), remaining: \(total - currentSeconds)")
+                    // Trigger auto-play when less than 0.5 seconds remaining (more aggressive)
+                    if total > 0 && total - currentSeconds <= 0.5 && !self.didTriggerEndForCurrentItem {
+                        print("🔥 Song ending detected via progress monitoring - total: \(total), current: \(currentSeconds), remaining: \(total - currentSeconds)")
                         self.didTriggerEndForCurrentItem = true
-                        self.handleSongEnded()
+                        
+                        // Add small delay to ensure smooth transition
+                        Task {
+                            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 second
+                            await MainActor.run {
+                                self.handleSongEnded()
+                            }
+                        }
                     }
                 }
             }
@@ -1272,6 +1480,8 @@ final class AppViewModel: ObservableObject {
                 let jsonData = try JSONSerialization.data(withJSONObject: songsData)
                 let songs = try JSONDecoder().decode([SongItem].self, from: jsonData)
                 self.albumSongs = songs
+                // Update playlist context if current song might be in new album
+                self.updatePlaylistContextIfNeeded()
                 if songs.isEmpty {
                     self.errorMessage = "No songs found in this album"
                 }
@@ -1316,6 +1526,9 @@ final class AppViewModel: ObservableObject {
             } else {
                 self.artistAlbums = []
             }
+            
+            // Update playlist context if current song might be in new artist songs
+            self.updatePlaylistContextIfNeeded()
         } catch {
             self.errorMessage = error.localizedDescription
             self.artistSongs = []
@@ -1808,6 +2021,14 @@ main()
                     continuation.resume(throwing: error)
                 }
             }
+        }
+    }
+    
+    deinit {
+        // Clean up observer when ViewModel is deallocated
+        if let token = endObserverToken {
+            print("🧹 ViewModel deinit: removing AVPlayerItemDidPlayToEndTime observer")
+            NotificationCenter.default.removeObserver(token)
         }
     }
 }
