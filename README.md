@@ -1,3 +1,4 @@
+![image.png](./image.png)
 # Spotlight Music
 
 A modern macOS music player app built with SwiftUI that integrates with YouTube Music for streaming audio content.

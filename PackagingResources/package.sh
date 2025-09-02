@@ -6,7 +6,7 @@ set -euo pipefail
 SCHEME="Spotlight Music"
 CONFIG="Release"
 BUNDLE_ID=""
-VERSION="1.0.0"
+VERSION="1.0.7"
 SIGN_ID=""
 BUNDLE_PYTHON=""
 WHEELS_DIR=""
