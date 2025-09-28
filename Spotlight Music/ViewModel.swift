@@ -420,7 +420,9 @@ final class AppViewModel: ObservableObject {
                 self.videos = []
             }
         } catch {
-            self.errorMessage = error.localizedDescription
+            // Better error handling to prevent app crashes
+            print("Search error for query '\(trimmed)': \(error.localizedDescription)")
+            self.errorMessage = "Search failed. Please try again."
             self.songs = []
             self.albums = []
             self.artists = []
@@ -1350,7 +1352,12 @@ final class AppViewModel: ObservableObject {
 
     private func runHelper(arguments: [String]) async throws -> [String: Any] {
         // Make sure environment is ready first (handles first-run installs)
-        await ensurePythonSiteInstalled()
+        do {
+            await ensurePythonSiteInstalled()
+        } catch {
+            print("Failed to setup Python environment: \(error.localizedDescription)")
+            return ["error": "Failed to setup Python environment. Please try again."]
+        }
         
         guard let pythonExec = selectPythonExec() else {
             return ["error": "Python 3 not found. Please install Python 3 or bundle it with the app."]
@@ -1358,10 +1365,20 @@ final class AppViewModel: ObservableObject {
         let siteDir = sitePackagesPath()
 
         return try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                
+                // Add timeout and better error handling
+                let timeoutTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+                timeoutTimer.schedule(deadline: .now() + 30) // 30 second timeout
+                timeoutTimer.setEventHandler {
+                    process.terminate()
+                    continuation.resume(returning: ["error": "Search timed out. Please try again."])
+                }
+                timeoutTimer.resume()
 
-            // Inline Python to avoid bundling external files
-            let pythonCode = """
+                // Inline Python to avoid bundling external files
+                let pythonCode = """
 import json, os, sys
 from typing import Any, Dict, List, Optional
 site = r"\(siteDir)"
@@ -1827,14 +1844,7 @@ main()
             }
         }
     }
-    
-    deinit {
-        // Clean up observer when ViewModel is deallocated
-        if let token = endObserverToken {
-            print("🧹 ViewModel deinit: removing AVPlayerItemDidPlayToEndTime observer")
-            NotificationCenter.default.removeObserver(token)
-        }
-    }
 }
 
 
+}

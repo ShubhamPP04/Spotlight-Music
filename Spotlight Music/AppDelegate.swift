@@ -51,18 +51,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Application setup code here
     }
-
-    // MARK: - Relaunch
-    private func relaunchApp() {
-        let task = Process()
-    task.launchPath = "/bin/sh"
-    // Give the current app a moment to terminate cleanly, then reopen via 'open -n'
-    let cmd = "sleep 1; open -n \"\(Bundle.main.bundlePath)\""
-    task.arguments = ["-c", cmd]
-    do { try task.run() } catch { print("Failed to schedule relaunch: \(error)") }
-        // Terminate current app
-        NSApp.terminate(nil)
-    }
 }
 
 // MARK: - NSWindowDelegate
@@ -77,17 +65,6 @@ extension AppDelegate: NSWindowDelegate {
         // Clear the reference
         settingsWindow = nil
         
-        // Restart the app when the Settings window is closed
-        DispatchQueue.main.async { [weak self] in
-            self?.relaunchApp()
-        }
-    }
-    
-    private func windowDidClose(_ notification: Notification) {
-        // Additional cleanup if needed
-        if let window = notification.object as? NSWindow,
-           window == settingsWindow {
-            settingsWindow = nil
-        }
+        // Note: Removed automatic relaunch - let the app continue running normally
     }
 }

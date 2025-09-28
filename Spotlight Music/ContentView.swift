@@ -32,7 +32,8 @@ struct ContentView: View {
             }
         }
     }
-    @State private var animatedHeight: CGFloat = 120
+    @State private var fixedHeight: CGFloat = 400  // Use fixed height to prevent constraint loops
+    @State private var isUpdatingHeight = false
     @State private var expandedSongs = false
     @State private var expandedAlbums = false
     @State private var expandedArtists = false
@@ -161,9 +162,6 @@ struct ContentView: View {
             .background(WindowConfigurator())
         
         let finalContent = styledContent
-            .onChange(of: targetHeight) { _, newHeight in
-                updateAnimatedHeight(newHeight)
-            }
             .onChange(of: viewModel.query) { _, _ in
                 resetExpandedStates()
             }
@@ -175,16 +173,11 @@ struct ContentView: View {
                 }
             }
             .onAppear {
-                animatedHeight = targetHeight
                 isSearchFieldFocused = true
             }
             .task { await viewModel.performSetupForPython() }
             .alert(item: errorBinding) { (item: IdentifiableString) in
                 Alert(title: Text("Error"), message: Text(item.value))
-            }
-            .onKeyPress(KeyEquivalent.escape) {
-                handleEscapeKey()
-                return .handled
             }
         
         return finalContent
@@ -197,7 +190,7 @@ struct ContentView: View {
                 resultsPane
             }
             .padding(.bottom, 8)
-            .frame(width: settings.windowSize.width, height: animatedHeight)
+            .frame(width: settings.windowSize.width, height: fixedHeight)
         }
     }
     
@@ -208,16 +201,7 @@ struct ContentView: View {
         )
     }
     
-    private func updateAnimatedHeight(_ newHeight: CGFloat) {
-        if settings.shouldEnableAnimations() {
-            // Use faster, less CPU-intensive animation
-            withAnimation(.easeOut(duration: 0.15)) {
-                animatedHeight = newHeight
-            }
-        } else {
-            animatedHeight = newHeight
-        }
-    }
+    // Height update function removed to prevent constraint loops
     
     private func resetExpandedStates() {
         expandedSongs = false
@@ -417,7 +401,7 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
             }
-            .frame(maxHeight: animatedHeight - 92) // Dynamic max height based on window size
+            .frame(maxHeight: fixedHeight - 92) // Fixed max height to prevent constraint loops
             .onChange(of: viewModel.nowPlaying?.id) { _, newId in
                 guard let id = newId else { return }
                 let animate = settings.shouldEnableAnimations()
